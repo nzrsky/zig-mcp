@@ -1,0 +1,18 @@
+{
+  "name": "zig",
+  "owner": {
+    "name": "nazavtra"
+  },
+  "metadata": {
+    "description": "Zig LSP MCP server"
+  },
+  "plugins": [
+    {
+      "name": "zig-mcp",
+      "source": "./",
+      "description": "Zig language support via ZLS — hover, go-to-definition, references, diagnostics, formatting, build, test, and more",
+      "version": "0.1.0",
+      "homepage": "https://github.com/nzrsky/zig-mcp"
+    }
+  ]
+}
