@@ -1,0 +1,17 @@
+{
+  "name": "zig-mcp",
+  "description": "Zig language support via ZLS — hover, go-to-definition, references, diagnostics, formatting, build, test, and more",
+  "version": "0.1.0",
+  "author": {
+    "name": "nazavtra"
+  },
+  "homepage": "https://github.com/nzrsky/zig-mcp",
+  "repository": "https://github.com/nzrsky/zig-mcp",
+  "license": "MIT",
+  "keywords": ["zig", "zls", "lsp", "mcp"],
+  "mcpServers": {
+    "zig-mcp": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/run.sh"
+    }
+  }
+}
