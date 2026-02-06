@@ -1,0 +1,11 @@
+.{
+    .name = .zig_mcp,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+    .fingerprint = 0x1c29ab0bcc063214,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
