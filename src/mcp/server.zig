@@ -428,8 +428,7 @@ pub const McpServer = struct {
 
     fn handleResourcesList(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId) !void {
         const rid = id orelse return;
-        // Return empty resource list for now
-        const resp = try json_rpc.writeResponse(allocator, rid, .{ .resources = &[_]u8{} });
+        const resp = try writeResourcesListResponse(allocator, rid);
         try self.transport.writeMessage(resp);
     }
 };
@@ -447,8 +446,16 @@ fn methodAllowedBeforeInitialize(method: []const u8) bool {
 fn methodAllowedDuringInitialize(method: []const u8) bool {
     return std.mem.eql(u8, method, "notifications/initialized") or
         std.mem.eql(u8, method, "initialized") or
+        std.mem.eql(u8, method, "tools/list") or
+        std.mem.eql(u8, method, "tools/call") or
+        std.mem.eql(u8, method, "resources/list") or
         std.mem.eql(u8, method, "ping") or
         std.mem.eql(u8, method, "shutdown");
+}
+
+fn writeResourcesListResponse(allocator: std.mem.Allocator, id: json_rpc.RequestId) ![]const u8 {
+    const empty_resources: []const mcp_types.Resource = &.{};
+    return json_rpc.writeResponse(allocator, id, .{ .resources = empty_resources });
 }
 
 fn negotiateProtocolVersion(params: std.json.Value) ![]const u8 {
@@ -488,10 +495,26 @@ test "method gating before initialize" {
 
 test "method gating during initialize" {
     try std.testing.expect(methodAllowedDuringInitialize("initialized"));
-    try std.testing.expect(!methodAllowedDuringInitialize("tools/list"));
+    try std.testing.expect(methodAllowedDuringInitialize("tools/list"));
+    try std.testing.expect(methodAllowedDuringInitialize("tools/call"));
+    try std.testing.expect(methodAllowedDuringInitialize("resources/list"));
 }
 
 test "isRecoverableTransportError handles oversized messages" {
     try std.testing.expect(isRecoverableTransportError(error.MessageTooLarge));
     try std.testing.expect(!isRecoverableTransportError(error.OutOfMemory));
+}
+
+test "resources/list response uses array shape" {
+    const alloc = std.testing.allocator;
+    const resp = try writeResourcesListResponse(alloc, .{ .integer = 1 });
+    defer alloc.free(resp);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    const result = obj.get("result").?.object;
+    try std.testing.expect(result.get("resources").? == .array);
+    try std.testing.expectEqual(@as(usize, 0), result.get("resources").?.array.items.len);
 }
