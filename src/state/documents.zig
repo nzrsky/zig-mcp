@@ -27,7 +27,7 @@ pub const DocumentState = struct {
     /// `file_path` can be relative (resolved against workspace) or absolute.
     /// Returns a URI allocated with `ret_allocator` (caller must free).
     pub fn ensureOpen(self: *DocumentState, lsp_client: *LspClient, file_path: []const u8, ret_allocator: std.mem.Allocator) ![]const u8 {
-        const abs_path = try uri_util.resolvePath(self.allocator, self.workspace_path, file_path);
+        const abs_path = try uri_util.resolvePathWithinWorkspace(self.allocator, self.workspace_path, file_path);
         defer self.allocator.free(abs_path);
 
         const file_uri = try uri_util.pathToUri(self.allocator, abs_path);

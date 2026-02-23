@@ -243,7 +243,7 @@ fn handleHover(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const HoverParams = struct {
@@ -266,7 +266,7 @@ fn handleDefinition(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -288,7 +288,7 @@ fn handleReferences(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -312,7 +312,7 @@ fn handleCompletion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -333,7 +333,7 @@ fn handleDiagnostics(ctx: ToolContext, args: std.json.Value) ToolError![]const u
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
 
     // Opening the file triggers ZLS to compute diagnostics
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     // Give ZLS a moment to compute diagnostics, then request them via
@@ -349,7 +349,7 @@ fn handleDiagnostics(ctx: ToolContext, args: std.json.Value) ToolError![]const u
 fn handleFormat(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -375,7 +375,7 @@ fn handleRename(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
     const new_name = getStringArg(args, "new_name") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -397,7 +397,7 @@ fn handleRename(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 fn handleDocumentSymbols(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -434,7 +434,7 @@ fn handleCodeAction(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     const end_line = getIntArg(args, "end_line") orelse return ToolError.InvalidParams;
     const end_char = getIntArg(args, "end_char") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -466,7 +466,7 @@ fn handleSignatureHelp(ctx: ToolContext, args: std.json.Value) ToolError![]const
     const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -495,11 +495,14 @@ fn handleTest(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const filter = getStringArg(args, "filter");
 
     if (file) |f| {
+        const abs_path = uri_util.resolvePathWithinWorkspace(ctx.allocator, ctx.workspace.root_path, f) catch |err| return pathToToolError(err);
+        defer ctx.allocator.free(abs_path);
+
         // zig test <file> [--test-filter <filter>]
         var cmd_args: std.ArrayList([]const u8) = .empty;
         defer cmd_args.deinit(ctx.allocator);
         cmd_args.append(ctx.allocator, "test") catch return ToolError.OutOfMemory;
-        cmd_args.append(ctx.allocator, f) catch return ToolError.OutOfMemory;
+        cmd_args.append(ctx.allocator, abs_path) catch return ToolError.OutOfMemory;
         if (filter) |filt| {
             cmd_args.append(ctx.allocator, "--test-filter") catch return ToolError.OutOfMemory;
             cmd_args.append(ctx.allocator, filt) catch return ToolError.OutOfMemory;
@@ -513,7 +516,7 @@ fn handleTest(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 
 fn handleCheck(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const abs_path = uri_util.resolvePath(ctx.allocator, ctx.workspace.root_path, file) catch return ToolError.OutOfMemory;
+    const abs_path = uri_util.resolvePathWithinWorkspace(ctx.allocator, ctx.workspace.root_path, file) catch |err| return pathToToolError(err);
     defer ctx.allocator.free(abs_path);
     return runZigCommandArgs(ctx.allocator, ctx.workspace.root_path, &.{ "ast-check", abs_path }) catch return ToolError.CommandFailed;
 }
@@ -1097,6 +1100,24 @@ fn lspToToolError(err: anytype) ToolError {
         error.RequestTimeout => ToolError.RequestTimeout,
         error.NoResponse => ToolError.NoResponse,
         else => ToolError.LspError,
+    };
+}
+
+fn openPathToToolError(err: anytype) ToolError {
+    return switch (err) {
+        error.PathOutsideWorkspace => ToolError.PathOutsideWorkspace,
+        error.FileNotFound => ToolError.FileNotFound,
+        error.FileReadError => ToolError.FileReadError,
+        else => ToolError.LspError,
+    };
+}
+
+fn pathToToolError(err: anytype) ToolError {
+    return switch (err) {
+        error.PathOutsideWorkspace => ToolError.PathOutsideWorkspace,
+        error.FileNotFound => ToolError.FileNotFound,
+        error.OutOfMemory => ToolError.OutOfMemory,
+        else => ToolError.CommandFailed,
     };
 }
 
