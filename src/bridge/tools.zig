@@ -486,11 +486,13 @@ fn handleSignatureHelp(ctx: ToolContext, args: std.json.Value) ToolError![]const
 // ── Command tool handlers ──
 
 fn handleBuild(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    try requireCommandTools(ctx);
     const extra_args = getStringArg(args, "args");
     return runZigCommand(ctx.allocator, ctx.workspace.root_path, "build", extra_args) catch return ToolError.CommandFailed;
 }
 
 fn handleTest(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    try requireCommandTools(ctx);
     const file = getStringArg(args, "file");
     const filter = getStringArg(args, "filter");
 
@@ -515,6 +517,7 @@ fn handleTest(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 }
 
 fn handleCheck(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    try requireCommandTools(ctx);
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
     const abs_path = uri_util.resolvePathWithinWorkspace(ctx.allocator, ctx.workspace.root_path, file) catch |err| return pathToToolError(err);
     defer ctx.allocator.free(abs_path);
@@ -522,6 +525,7 @@ fn handleCheck(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 }
 
 fn handleVersion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    try requireCommandTools(ctx);
     _ = args;
     const zig_ver = runZigCommand(ctx.allocator, ctx.workspace.root_path, "version", null) catch "unknown";
     defer if (!std.mem.eql(u8, zig_ver, "unknown")) ctx.allocator.free(zig_ver);
@@ -538,6 +542,7 @@ fn handleVersion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 }
 
 fn handleManage(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    try requireCommandTools(ctx);
     const action = getStringArg(args, "action") orelse return ToolError.InvalidParams;
     const version = getStringArg(args, "version");
 
@@ -1121,6 +1126,10 @@ fn pathToToolError(err: anytype) ToolError {
     };
 }
 
+fn requireCommandTools(ctx: ToolContext) ToolError!void {
+    if (!ctx.allow_command_tools) return ToolError.CommandToolsDisabled;
+}
+
 // ── Tests ──
 
 test "getStringArg extracts string from JSON object" {
@@ -1158,6 +1167,18 @@ test "getIntArg from float rounds" {
 
 test "getIntArg from non-object returns null" {
     try std.testing.expect(getIntArg(.null, "key") == null);
+}
+
+test "requireCommandTools enforces policy" {
+    const alloc = std.testing.allocator;
+    const ctx = ToolContext{
+        .lsp_client = undefined,
+        .doc_state = undefined,
+        .workspace = undefined,
+        .allocator = alloc,
+        .allow_command_tools = false,
+    };
+    try std.testing.expectError(ToolError.CommandToolsDisabled, requireCommandTools(ctx));
 }
 
 test "formatHoverResponse with markup content" {
