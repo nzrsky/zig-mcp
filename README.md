@@ -111,6 +111,7 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 ```
 --workspace, -w <path>   Project root directory (default: cwd)
 --zls-path <path>        Path to ZLS binary (default: auto-detect from PATH)
+--allow-command-tools    Enable command execution tools (disabled by default)
 --help, -h               Show help
 --version                Show version
 ```
@@ -134,6 +135,8 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 | `zig_signature_help` | Function signature at cursor |
 
 ### Build & run
+
+Command execution tools are disabled by default. Start zig-mcp with `--allow-command-tools` to enable them.
 
 | Tool | What it does |
 |------|-------------|

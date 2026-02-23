@@ -33,6 +33,7 @@ pub const McpServer = struct {
     workspace: *const Workspace,
     allocator: std.mem.Allocator,
     zls_process: ?*ZlsProcess = null,
+    allow_command_tools: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -41,6 +42,7 @@ pub const McpServer = struct {
         lsp_client: *LspClient,
         doc_state: *DocumentState,
         workspace: *const Workspace,
+        allow_command_tools: bool,
     ) McpServer {
         return .{
             .transport = transport,
@@ -49,6 +51,7 @@ pub const McpServer = struct {
             .doc_state = doc_state,
             .workspace = workspace,
             .allocator = allocator,
+            .allow_command_tools = allow_command_tools,
         };
     }
 
@@ -287,6 +290,7 @@ pub const McpServer = struct {
             .doc_state = self.doc_state,
             .workspace = self.workspace,
             .allocator = allocator,
+            .allow_command_tools = self.allow_command_tools,
         };
 
         const result_text = handler(ctx, tool_args) catch |err| {
@@ -319,6 +323,7 @@ pub const McpServer = struct {
             error.PathOutsideWorkspace => "Path is outside workspace",
             error.CommandFailed => "Command execution failed",
             error.ZlsNotRunning => "ZLS is not running",
+            error.CommandToolsDisabled => "Command tools are disabled",
             error.OutOfMemory => "Out of memory",
         };
         try self.writeToolResult(allocator, id, err_msg, true);

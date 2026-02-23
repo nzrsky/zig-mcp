@@ -59,6 +59,7 @@ pub fn main() !void {
 
     var workspace_path: ?[]const u8 = null;
     var zls_path_arg: ?[]const u8 = null;
+    var allow_command_tools = false;
 
     // Skip program name
     _ = args.next();
@@ -67,6 +68,8 @@ pub fn main() !void {
             workspace_path = args.next();
         } else if (std.mem.eql(u8, arg, "--zls-path")) {
             zls_path_arg = args.next();
+        } else if (std.mem.eql(u8, arg, "--allow-command-tools")) {
+            allow_command_tools = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printUsage();
             return;
@@ -100,7 +103,7 @@ pub fn main() !void {
             std.debug.print("[zig-mcp] Warning: ZLS not found. LSP-backed tools will not work.\n", .{});
             std.debug.print("[zig-mcp] Install ZLS or specify --zls-path <path>\n", .{});
             // Continue without ZLS — command tools still work
-            return runWithoutZls(allocator, &workspace);
+            return runWithoutZls(allocator, &workspace, allow_command_tools);
         };
     defer allocator.free(zls_path);
     std.debug.print("[zig-mcp] ZLS: {s}\n", .{zls_path});
@@ -111,7 +114,7 @@ pub fn main() !void {
 
     zls_proc.spawn() catch |err| {
         std.debug.print("[zig-mcp] Failed to spawn ZLS: {}\n", .{err});
-        return runWithoutZls(allocator, &workspace);
+        return runWithoutZls(allocator, &workspace, allow_command_tools);
     };
 
     // Initialize LSP client
@@ -137,7 +140,7 @@ pub fn main() !void {
     std.debug.print("[zig-mcp] Initializing LSP session...\n", .{});
     const init_response = lsp_client.initialize(allocator, workspace.root_uri) catch |err| {
         std.debug.print("[zig-mcp] LSP initialize failed: {}\n", .{err});
-        return runWithoutZls(allocator, &workspace);
+        return runWithoutZls(allocator, &workspace, allow_command_tools);
     };
     allocator.free(init_response);
     std.debug.print("[zig-mcp] LSP session initialized\n", .{});
@@ -155,7 +158,7 @@ pub fn main() !void {
     var transport = McpTransport.init();
 
     // Run MCP server (with ZLS process for auto-reconnect on crash)
-    var server = McpServer.init(allocator, &transport, &registry, &lsp_client, &doc_state, &workspace);
+    var server = McpServer.init(allocator, &transport, &registry, &lsp_client, &doc_state, &workspace, allow_command_tools);
     server.zls_process = &zls_proc;
     std.debug.print("[zig-mcp] Server ready, waiting for MCP messages on stdin\n", .{});
     try server.run();
@@ -164,7 +167,7 @@ pub fn main() !void {
 }
 
 /// Run in degraded mode without ZLS (command tools only).
-fn runWithoutZls(allocator: std.mem.Allocator, workspace: *Workspace) !void {
+fn runWithoutZls(allocator: std.mem.Allocator, workspace: *Workspace, allow_command_tools: bool) !void {
     var doc_state = DocumentState.init(allocator, workspace.root_path);
     defer doc_state.deinit();
 
@@ -176,7 +179,7 @@ fn runWithoutZls(allocator: std.mem.Allocator, workspace: *Workspace) !void {
     try tools.registerAll(&registry);
 
     var transport = McpTransport.init();
-    var server = McpServer.init(allocator, &transport, &registry, &lsp_client, &doc_state, workspace);
+    var server = McpServer.init(allocator, &transport, &registry, &lsp_client, &doc_state, workspace, allow_command_tools);
     std.debug.print("[zig-mcp] Running without ZLS (command tools only)\n", .{});
     try server.run();
 }
@@ -190,6 +193,7 @@ fn printUsage() void {
         \\Options:
         \\  --workspace, -w <path>   Workspace root directory (default: cwd)
         \\  --zls-path <path>        Path to ZLS binary (default: auto-detect)
+        \\  --allow-command-tools    Enable command execution tools (zig_build/zig_test/zig_check/zig_version/zig_manage)
         \\  --help, -h               Show this help message
         \\  --version                Show version
         \\

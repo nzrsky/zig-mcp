@@ -11,6 +11,7 @@ pub const ToolContext = struct {
     doc_state: *DocumentState,
     workspace: *const Workspace,
     allocator: std.mem.Allocator,
+    allow_command_tools: bool,
 };
 
 /// A tool handler function.
@@ -28,6 +29,7 @@ pub const ToolError = error{
     OutOfMemory,
     CommandFailed,
     ZlsNotRunning,
+    CommandToolsDisabled,
 };
 
 /// Tool registry: maps tool names to handlers and definitions.
