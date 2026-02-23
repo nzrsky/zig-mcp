@@ -11,6 +11,10 @@ pub const ToolContext = struct {
     doc_state: *DocumentState,
     workspace: *const Workspace,
     allocator: std.mem.Allocator,
+    allow_command_tools: bool,
+    zig_path: ?[]const u8,
+    zvm_path: ?[]const u8,
+    zls_path: ?[]const u8,
 };
 
 /// A tool handler function.
@@ -24,9 +28,11 @@ pub const ToolError = error{
     NoResponse,
     FileNotFound,
     FileReadError,
+    PathOutsideWorkspace,
     OutOfMemory,
     CommandFailed,
     ZlsNotRunning,
+    CommandToolsDisabled,
 };
 
 /// Tool registry: maps tool names to handlers and definitions.

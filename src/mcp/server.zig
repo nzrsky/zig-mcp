@@ -14,8 +14,14 @@ const log = std.log.scoped(.mcp_server);
 /// MCP server state machine.
 pub const State = enum {
     uninitialized,
+    initializing,
     running,
     shutdown,
+};
+
+const supported_protocol_versions = [_][]const u8{
+    "2025-06-18",
+    "2024-11-05",
 };
 
 pub const McpServer = struct {
@@ -27,6 +33,10 @@ pub const McpServer = struct {
     workspace: *const Workspace,
     allocator: std.mem.Allocator,
     zls_process: ?*ZlsProcess = null,
+    allow_command_tools: bool = false,
+    zig_path: ?[]const u8 = null,
+    zvm_path: ?[]const u8 = null,
+    zls_path: ?[]const u8 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -35,6 +45,10 @@ pub const McpServer = struct {
         lsp_client: *LspClient,
         doc_state: *DocumentState,
         workspace: *const Workspace,
+        allow_command_tools: bool,
+        zig_path: ?[]const u8,
+        zvm_path: ?[]const u8,
+        zls_path: ?[]const u8,
     ) McpServer {
         return .{
             .transport = transport,
@@ -43,13 +57,25 @@ pub const McpServer = struct {
             .doc_state = doc_state,
             .workspace = workspace,
             .allocator = allocator,
+            .allow_command_tools = allow_command_tools,
+            .zig_path = zig_path,
+            .zvm_path = zvm_path,
+            .zls_path = zls_path,
         };
     }
 
     /// Main loop: read MCP messages, dispatch, respond.
     pub fn run(self: *McpServer) !void {
         while (self.state != .shutdown) {
-            const msg_data = try self.transport.readMessage(self.allocator);
+            const msg_data = self.transport.readMessage(self.allocator) catch |err| {
+                if (isRecoverableTransportError(err)) {
+                    const error_resp = try json_rpc.writeError(self.allocator, null, json_rpc.ErrorCode.parse_error, "Message too large");
+                    defer self.allocator.free(error_resp);
+                    self.transport.writeMessage(error_resp) catch {};
+                    continue;
+                }
+                return err;
+            };
             if (msg_data == null) {
                 // stdin EOF — clean shutdown
                 break;
@@ -112,8 +138,23 @@ pub const McpServer = struct {
         const params = obj.get("params") orelse .null;
 
         // Dispatch
+        if (self.state == .uninitialized and !methodAllowedBeforeInitialize(method)) {
+            if (id) |rid| {
+                const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.server_not_initialized, "Server not initialized");
+                try self.transport.writeMessage(resp);
+            }
+            return;
+        }
+        if (self.state == .initializing and !methodAllowedDuringInitialize(method)) {
+            if (id) |rid| {
+                const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.server_not_initialized, "Server not initialized");
+                try self.transport.writeMessage(resp);
+            }
+            return;
+        }
+
         if (std.mem.eql(u8, method, "initialize")) {
-            try self.handleInitialize(allocator, id);
+            try self.handleInitialize(allocator, id, params);
         } else if (std.mem.eql(u8, method, "notifications/initialized") or std.mem.eql(u8, method, "initialized")) {
             // No response needed
             self.state = .running;
@@ -143,11 +184,26 @@ pub const McpServer = struct {
         }
     }
 
-    fn handleInitialize(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId) !void {
+    fn handleInitialize(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId, params: std.json.Value) !void {
         const rid = id orelse return;
+        if (self.state != .uninitialized) {
+            const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.invalid_request, "Server already initialized");
+            try self.transport.writeMessage(resp);
+            return;
+        }
+
+        const protocol_version = negotiateProtocolVersion(params) catch |err| {
+            const msg = switch (err) {
+                error.InvalidParams => "Missing or invalid protocolVersion",
+                error.UnsupportedProtocolVersion => "Unsupported protocolVersion",
+            };
+            const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.invalid_params, msg);
+            try self.transport.writeMessage(resp);
+            return;
+        };
 
         const result = mcp_types.InitializeResult{
-            .protocolVersion = "2024-11-05",
+            .protocolVersion = protocol_version,
             .capabilities = .{
                 .tools = .{},
                 .resources = .{},
@@ -160,7 +216,7 @@ pub const McpServer = struct {
 
         const resp = try json_rpc.writeResponse(allocator, rid, result);
         try self.transport.writeMessage(resp);
-        self.state = .running;
+        self.state = .initializing;
     }
 
     fn handleToolsList(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId) !void {
@@ -250,6 +306,10 @@ pub const McpServer = struct {
             .doc_state = self.doc_state,
             .workspace = self.workspace,
             .allocator = allocator,
+            .allow_command_tools = self.allow_command_tools,
+            .zig_path = self.zig_path,
+            .zvm_path = self.zvm_path,
+            .zls_path = self.zls_path,
         };
 
         const result_text = handler(ctx, tool_args) catch |err| {
@@ -279,8 +339,10 @@ pub const McpServer = struct {
             error.NoResponse => "No response from ZLS",
             error.FileNotFound => "File not found",
             error.FileReadError => "Could not read file",
+            error.PathOutsideWorkspace => "Path is outside workspace",
             error.CommandFailed => "Command execution failed",
             error.ZlsNotRunning => "ZLS is not running",
+            error.CommandToolsDisabled => "Command tools are disabled",
             error.OutOfMemory => "Out of memory",
         };
         try self.writeToolResult(allocator, id, err_msg, true);
@@ -366,8 +428,93 @@ pub const McpServer = struct {
 
     fn handleResourcesList(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId) !void {
         const rid = id orelse return;
-        // Return empty resource list for now
-        const resp = try json_rpc.writeResponse(allocator, rid, .{ .resources = &[_]u8{} });
+        const resp = try writeResourcesListResponse(allocator, rid);
         try self.transport.writeMessage(resp);
     }
 };
+
+fn isRecoverableTransportError(err: anytype) bool {
+    return err == error.MessageTooLarge;
+}
+
+fn methodAllowedBeforeInitialize(method: []const u8) bool {
+    return std.mem.eql(u8, method, "initialize") or
+        std.mem.eql(u8, method, "ping") or
+        std.mem.eql(u8, method, "shutdown");
+}
+
+fn methodAllowedDuringInitialize(method: []const u8) bool {
+    return std.mem.eql(u8, method, "notifications/initialized") or
+        std.mem.eql(u8, method, "initialized") or
+        std.mem.eql(u8, method, "tools/list") or
+        std.mem.eql(u8, method, "tools/call") or
+        std.mem.eql(u8, method, "resources/list") or
+        std.mem.eql(u8, method, "ping") or
+        std.mem.eql(u8, method, "shutdown");
+}
+
+fn writeResourcesListResponse(allocator: std.mem.Allocator, id: json_rpc.RequestId) ![]const u8 {
+    const empty_resources: []const mcp_types.Resource = &.{};
+    return json_rpc.writeResponse(allocator, id, .{ .resources = empty_resources });
+}
+
+fn negotiateProtocolVersion(params: std.json.Value) ![]const u8 {
+    const obj = switch (params) {
+        .object => |o| o,
+        else => return error.InvalidParams,
+    };
+    const client_version = switch (obj.get("protocolVersion") orelse return error.InvalidParams) {
+        .string => |s| s,
+        else => return error.InvalidParams,
+    };
+    for (supported_protocol_versions) |version| {
+        if (std.mem.eql(u8, version, client_version)) return version;
+    }
+    return error.UnsupportedProtocolVersion;
+}
+
+test "negotiateProtocolVersion accepts supported versions" {
+    const alloc = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, "{\"protocolVersion\":\"2025-06-18\"}", .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("2025-06-18", try negotiateProtocolVersion(parsed.value));
+}
+
+test "negotiateProtocolVersion rejects unsupported version" {
+    const alloc = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, "{\"protocolVersion\":\"2020-01-01\"}", .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.UnsupportedProtocolVersion, negotiateProtocolVersion(parsed.value));
+}
+
+test "method gating before initialize" {
+    try std.testing.expect(methodAllowedBeforeInitialize("initialize"));
+    try std.testing.expect(methodAllowedBeforeInitialize("ping"));
+    try std.testing.expect(!methodAllowedBeforeInitialize("tools/call"));
+}
+
+test "method gating during initialize" {
+    try std.testing.expect(methodAllowedDuringInitialize("initialized"));
+    try std.testing.expect(methodAllowedDuringInitialize("tools/list"));
+    try std.testing.expect(methodAllowedDuringInitialize("tools/call"));
+    try std.testing.expect(methodAllowedDuringInitialize("resources/list"));
+}
+
+test "isRecoverableTransportError handles oversized messages" {
+    try std.testing.expect(isRecoverableTransportError(error.MessageTooLarge));
+    try std.testing.expect(!isRecoverableTransportError(error.OutOfMemory));
+}
+
+test "resources/list response uses array shape" {
+    const alloc = std.testing.allocator;
+    const resp = try writeResourcesListResponse(alloc, .{ .integer = 1 });
+    defer alloc.free(resp);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    const result = obj.get("result").?.object;
+    try std.testing.expect(result.get("resources").? == .array);
+    try std.testing.expectEqual(@as(usize, 0), result.get("resources").?.array.items.len);
+}

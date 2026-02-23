@@ -13,7 +13,9 @@ AI assistant  <--(MCP stdio)-->  zig-mcp  <--(LSP pipes)-->  ZLS
 ## Requirements
 
 - [Zig](https://ziglang.org/download/) 0.15.2+
-- [ZLS](https://github.com/zigtools/zls/releases) (auto-detected from PATH, or specify with `--zls-path`)
+- [ZLS](https://github.com/zigtools/zls/releases) (auto-detected from trusted fixed locations, or specify with `--zls-path`)
+
+When you set `--zig-path`, point it to a Zig binary from a full Zig distribution directory (with sibling `lib/`), not a standalone copied binary.
 
 ## Install
 
@@ -106,11 +108,30 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 }
 ```
 
+### Codex
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.zig-mcp]
+command = "/absolute/path/to/zig-mcp"
+args = [
+  "--workspace", "/path/to/your/zig/project",
+  "--allow-command-tools",
+  "--zig-path", "/usr/bin/zig",
+]
+```
+
 ### Options
 
 ```
 --workspace, -w <path>   Project root directory (default: cwd)
---zls-path <path>        Path to ZLS binary (default: auto-detect from PATH)
+--zls-path <path>        Path to ZLS binary (default: trusted fixed locations)
+--zig-path <path>        Path to zig binary (required with --allow-command-tools)
+--zvm-path <path>        Path to zvm binary (optional, enables zig_manage)
+--allow-command-tools    Enable command execution tools (disabled by default)
+--allow-untrusted-binaries
+                        Allow binaries outside trusted dirs (/usr/bin, /usr/local/bin, /opt/homebrew/bin, $HOME/bin)
 --help, -h               Show help
 --version                Show version
 ```
@@ -135,6 +156,10 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 
 ### Build & run
 
+Command execution tools are disabled by default. Start zig-mcp with `--allow-command-tools` to enable them.
+`--allow-command-tools` requires `--zig-path`.
+`zig_manage` requires `--zvm-path`.
+
 | Tool | What it does |
 |------|-------------|
 | `zig_build` | Run `zig build` with optional args |
@@ -142,6 +167,20 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 | `zig_check` | Run `zig ast-check` on a file |
 | `zig_version` | Show Zig and ZLS versions |
 | `zig_manage` | Manage Zig versions via [zvm](https://github.com/marler/zvm) |
+
+## Trusted binary paths
+
+By default, configured binaries are allowed only from trusted directories:
+
+- `/usr/bin`
+- `/usr/local/bin`
+- `/opt/homebrew/bin`
+- `$HOME/bin`
+
+Notes:
+
+- Paths are validated using canonical paths. Symlink targets are checked.
+- If your binary lives outside trusted dirs, either move/copy the full installation into a trusted dir, or use `--allow-untrusted-binaries`.
 
 ## How it works
 

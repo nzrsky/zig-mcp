@@ -243,7 +243,7 @@ fn handleHover(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const HoverParams = struct {
@@ -266,7 +266,7 @@ fn handleDefinition(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -288,7 +288,7 @@ fn handleReferences(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -312,7 +312,7 @@ fn handleCompletion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -333,7 +333,7 @@ fn handleDiagnostics(ctx: ToolContext, args: std.json.Value) ToolError![]const u
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
 
     // Opening the file triggers ZLS to compute diagnostics
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     // Give ZLS a moment to compute diagnostics, then request them via
@@ -349,7 +349,7 @@ fn handleDiagnostics(ctx: ToolContext, args: std.json.Value) ToolError![]const u
 fn handleFormat(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -375,7 +375,7 @@ fn handleRename(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
     const new_name = getStringArg(args, "new_name") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -397,7 +397,7 @@ fn handleRename(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 fn handleDocumentSymbols(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -434,7 +434,7 @@ fn handleCodeAction(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     const end_line = getIntArg(args, "end_line") orelse return ToolError.InvalidParams;
     const end_char = getIntArg(args, "end_char") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -466,7 +466,7 @@ fn handleSignatureHelp(ctx: ToolContext, args: std.json.Value) ToolError![]const
     const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
     const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return openPathToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -486,44 +486,60 @@ fn handleSignatureHelp(ctx: ToolContext, args: std.json.Value) ToolError![]const
 // ── Command tool handlers ──
 
 fn handleBuild(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    try requireCommandTools(ctx);
+    const zig_path = commandBinary(ctx.zig_path) orelse return ToolError.CommandFailed;
     const extra_args = getStringArg(args, "args");
-    return runZigCommand(ctx.allocator, ctx.workspace.root_path, "build", extra_args) catch return ToolError.CommandFailed;
+    return runZigCommand(ctx.allocator, zig_path, ctx.workspace.root_path, "build", extra_args) catch return ToolError.CommandFailed;
 }
 
 fn handleTest(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    try requireCommandTools(ctx);
+    const zig_path = commandBinary(ctx.zig_path) orelse return ToolError.CommandFailed;
     const file = getStringArg(args, "file");
     const filter = getStringArg(args, "filter");
 
     if (file) |f| {
+        const abs_path = uri_util.resolvePathWithinWorkspace(ctx.allocator, ctx.workspace.root_path, f) catch |err| return pathToToolError(err);
+        defer ctx.allocator.free(abs_path);
+
         // zig test <file> [--test-filter <filter>]
         var cmd_args: std.ArrayList([]const u8) = .empty;
         defer cmd_args.deinit(ctx.allocator);
         cmd_args.append(ctx.allocator, "test") catch return ToolError.OutOfMemory;
-        cmd_args.append(ctx.allocator, f) catch return ToolError.OutOfMemory;
+        cmd_args.append(ctx.allocator, abs_path) catch return ToolError.OutOfMemory;
         if (filter) |filt| {
             cmd_args.append(ctx.allocator, "--test-filter") catch return ToolError.OutOfMemory;
             cmd_args.append(ctx.allocator, filt) catch return ToolError.OutOfMemory;
         }
-        return runZigCommandArgs(ctx.allocator, ctx.workspace.root_path, cmd_args.items) catch return ToolError.CommandFailed;
+        return runZigCommandArgs(ctx.allocator, zig_path, ctx.workspace.root_path, cmd_args.items) catch return ToolError.CommandFailed;
     } else {
         // zig build test
-        return runZigCommand(ctx.allocator, ctx.workspace.root_path, "build", "test") catch return ToolError.CommandFailed;
+        return runZigCommand(ctx.allocator, zig_path, ctx.workspace.root_path, "build", "test") catch return ToolError.CommandFailed;
     }
 }
 
 fn handleCheck(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    try requireCommandTools(ctx);
+    const zig_path = commandBinary(ctx.zig_path) orelse return ToolError.CommandFailed;
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const abs_path = uri_util.resolvePath(ctx.allocator, ctx.workspace.root_path, file) catch return ToolError.OutOfMemory;
+    const abs_path = uri_util.resolvePathWithinWorkspace(ctx.allocator, ctx.workspace.root_path, file) catch |err| return pathToToolError(err);
     defer ctx.allocator.free(abs_path);
-    return runZigCommandArgs(ctx.allocator, ctx.workspace.root_path, &.{ "ast-check", abs_path }) catch return ToolError.CommandFailed;
+    return runZigCommandArgs(ctx.allocator, zig_path, ctx.workspace.root_path, &.{ "ast-check", abs_path }) catch return ToolError.CommandFailed;
 }
 
 fn handleVersion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    try requireCommandTools(ctx);
     _ = args;
-    const zig_ver = runZigCommand(ctx.allocator, ctx.workspace.root_path, "version", null) catch "unknown";
+    const zig_ver = if (ctx.zig_path) |zig_path|
+        runZigCommand(ctx.allocator, zig_path, ctx.workspace.root_path, "version", null) catch "unknown"
+    else
+        "unknown";
     defer if (!std.mem.eql(u8, zig_ver, "unknown")) ctx.allocator.free(zig_ver);
 
-    const zls_ver = runCommand(ctx.allocator, &.{ "zls", "--version" }, ctx.workspace.root_path) catch "unknown";
+    const zls_ver = if (ctx.zls_path) |zls_path|
+        runCommand(ctx.allocator, &.{ zls_path, "--version" }, ctx.workspace.root_path) catch "unknown"
+    else
+        "unknown";
     defer if (!std.mem.eql(u8, zls_ver, "unknown")) ctx.allocator.free(zls_ver);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -535,18 +551,22 @@ fn handleVersion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 }
 
 fn handleManage(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    try requireCommandTools(ctx);
+    const zvm_path = commandBinary(ctx.zvm_path) orelse {
+        return ctx.allocator.dupe(u8, "zvm path not configured. Start server with --zvm-path <absolute path>") catch return ToolError.OutOfMemory;
+    };
     const action = getStringArg(args, "action") orelse return ToolError.InvalidParams;
     const version = getStringArg(args, "version");
 
     if (std.mem.eql(u8, action, "list")) {
-        return runCommand(ctx.allocator, &.{ "zvm", "list" }, ctx.workspace.root_path) catch
+        return runCommand(ctx.allocator, &.{ zvm_path, "list" }, ctx.workspace.root_path) catch
             return ctx.allocator.dupe(u8, "zvm not found. Install from https://github.com/tristanisham/zvm") catch return ToolError.OutOfMemory;
     } else if (std.mem.eql(u8, action, "install")) {
         const ver = version orelse return ToolError.InvalidParams;
-        return runCommand(ctx.allocator, &.{ "zvm", "install", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
+        return runCommand(ctx.allocator, &.{ zvm_path, "install", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
     } else if (std.mem.eql(u8, action, "use")) {
         const ver = version orelse return ToolError.InvalidParams;
-        return runCommand(ctx.allocator, &.{ "zvm", "use", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
+        return runCommand(ctx.allocator, &.{ zvm_path, "use", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
     }
     return ToolError.InvalidParams;
 }
@@ -1027,12 +1047,12 @@ fn formatSignatureHelpResponse(allocator: std.mem.Allocator, response: []const u
 
 // ── Command execution helpers ──
 
-fn runZigCommand(allocator: std.mem.Allocator, cwd: []const u8, subcmd: []const u8, extra: ?[]const u8) ![]const u8 {
+fn runZigCommand(allocator: std.mem.Allocator, zig_path: []const u8, cwd: []const u8, subcmd: []const u8, extra: ?[]const u8) ![]const u8 {
     if (extra) |args_str| {
         // Split extra args by space
         var arg_list: std.ArrayList([]const u8) = .empty;
         defer arg_list.deinit(allocator);
-        try arg_list.append(allocator, "zig");
+        try arg_list.append(allocator, zig_path);
         try arg_list.append(allocator, subcmd);
         var it = std.mem.splitScalar(u8, args_str, ' ');
         while (it.next()) |arg| {
@@ -1040,13 +1060,13 @@ fn runZigCommand(allocator: std.mem.Allocator, cwd: []const u8, subcmd: []const 
         }
         return runCommandSlice(allocator, arg_list.items, cwd);
     }
-    return runCommandSlice(allocator, &.{ "zig", subcmd }, cwd);
+    return runCommandSlice(allocator, &.{ zig_path, subcmd }, cwd);
 }
 
-fn runZigCommandArgs(allocator: std.mem.Allocator, cwd: []const u8, args: []const []const u8) ![]const u8 {
+fn runZigCommandArgs(allocator: std.mem.Allocator, zig_path: []const u8, cwd: []const u8, args: []const []const u8) ![]const u8 {
     var arg_list: std.ArrayList([]const u8) = .empty;
     defer arg_list.deinit(allocator);
-    try arg_list.append(allocator, "zig");
+    try arg_list.append(allocator, zig_path);
     for (args) |arg| {
         try arg_list.append(allocator, arg);
     }
@@ -1100,6 +1120,32 @@ fn lspToToolError(err: anytype) ToolError {
     };
 }
 
+fn openPathToToolError(err: anytype) ToolError {
+    return switch (err) {
+        error.PathOutsideWorkspace => ToolError.PathOutsideWorkspace,
+        error.FileNotFound => ToolError.FileNotFound,
+        error.FileReadError => ToolError.FileReadError,
+        else => ToolError.LspError,
+    };
+}
+
+fn pathToToolError(err: anytype) ToolError {
+    return switch (err) {
+        error.PathOutsideWorkspace => ToolError.PathOutsideWorkspace,
+        error.FileNotFound => ToolError.FileNotFound,
+        error.OutOfMemory => ToolError.OutOfMemory,
+        else => ToolError.CommandFailed,
+    };
+}
+
+fn requireCommandTools(ctx: ToolContext) ToolError!void {
+    if (!ctx.allow_command_tools) return ToolError.CommandToolsDisabled;
+}
+
+fn commandBinary(path: ?[]const u8) ?[]const u8 {
+    return path;
+}
+
 // ── Tests ──
 
 test "getStringArg extracts string from JSON object" {
@@ -1137,6 +1183,26 @@ test "getIntArg from float rounds" {
 
 test "getIntArg from non-object returns null" {
     try std.testing.expect(getIntArg(.null, "key") == null);
+}
+
+test "requireCommandTools enforces policy" {
+    const alloc = std.testing.allocator;
+    const ctx = ToolContext{
+        .lsp_client = undefined,
+        .doc_state = undefined,
+        .workspace = undefined,
+        .allocator = alloc,
+        .allow_command_tools = false,
+        .zig_path = null,
+        .zvm_path = null,
+        .zls_path = null,
+    };
+    try std.testing.expectError(ToolError.CommandToolsDisabled, requireCommandTools(ctx));
+}
+
+test "commandBinary returns null when unset" {
+    try std.testing.expect(commandBinary(null) == null);
+    try std.testing.expectEqualStrings("/usr/bin/zig", commandBinary("/usr/bin/zig").?);
 }
 
 test "formatHoverResponse with markup content" {
