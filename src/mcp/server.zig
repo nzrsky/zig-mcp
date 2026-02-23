@@ -196,7 +196,6 @@ pub const McpServer = struct {
             const msg = switch (err) {
                 error.InvalidParams => "Missing or invalid protocolVersion",
                 error.UnsupportedProtocolVersion => "Unsupported protocolVersion",
-                else => "Invalid initialize params",
             };
             const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.invalid_params, msg);
             try self.transport.writeMessage(resp);
