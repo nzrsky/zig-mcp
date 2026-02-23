@@ -9,6 +9,7 @@ const tools = @import("bridge/tools.zig");
 const DocumentState = @import("state/documents.zig").DocumentState;
 const Workspace = @import("state/workspace.zig").Workspace;
 const uri_util = @import("types/uri.zig");
+const binary_policy = @import("security/binary_policy.zig");
 
 // Pull in test references
 comptime {
@@ -27,6 +28,7 @@ comptime {
     _ = @import("lsp/client.zig");
     _ = @import("cmd/zig_runner.zig");
     _ = @import("cmd/zvm.zig");
+    _ = @import("security/binary_policy.zig");
 }
 
 pub const std_options: std.Options = .{
@@ -62,6 +64,7 @@ pub fn main() !void {
     var zig_path_arg: ?[]const u8 = null;
     var zvm_path_arg: ?[]const u8 = null;
     var allow_command_tools = false;
+    var allow_untrusted_binaries = false;
 
     // Skip program name
     _ = args.next();
@@ -76,6 +79,8 @@ pub fn main() !void {
             zvm_path_arg = args.next();
         } else if (std.mem.eql(u8, arg, "--allow-command-tools")) {
             allow_command_tools = true;
+        } else if (std.mem.eql(u8, arg, "--allow-untrusted-binaries")) {
+            allow_untrusted_binaries = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printUsage();
             return;
@@ -102,28 +107,16 @@ pub fn main() !void {
     std.debug.print("[zig-mcp] Workspace: {s}\n", .{workspace.root_path});
 
     const zig_path = if (zig_path_arg) |p|
-        try allocator.dupe(u8, p)
+        try validateBinaryPath(allocator, p, "zig", allow_untrusted_binaries)
     else
         null;
     defer if (zig_path) |p| allocator.free(p);
-    if (zig_path) |p| {
-        if (!std.fs.path.isAbsolute(p)) {
-            std.debug.print("[zig-mcp] Error: --zig-path must be an absolute path\n", .{});
-            std.process.exit(1);
-        }
-    }
 
     const zvm_path = if (zvm_path_arg) |p|
-        try allocator.dupe(u8, p)
+        try validateBinaryPath(allocator, p, "zvm", allow_untrusted_binaries)
     else
         null;
     defer if (zvm_path) |p| allocator.free(p);
-    if (zvm_path) |p| {
-        if (!std.fs.path.isAbsolute(p)) {
-            std.debug.print("[zig-mcp] Error: --zvm-path must be an absolute path\n", .{});
-            std.process.exit(1);
-        }
-    }
 
     if (allow_command_tools and zig_path == null) {
         std.debug.print("[zig-mcp] Error: --allow-command-tools requires --zig-path <absolute path>\n", .{});
@@ -132,11 +125,7 @@ pub fn main() !void {
 
     // Find ZLS
     const zls_path = if (zls_path_arg) |p| blk: {
-        if (!std.fs.path.isAbsolute(p)) {
-            std.debug.print("[zig-mcp] Error: --zls-path must be an absolute path\n", .{});
-            std.process.exit(1);
-        }
-        break :blk try allocator.dupe(u8, p);
+        break :blk try validateBinaryPath(allocator, p, "zls", allow_untrusted_binaries);
     }
     else
         findZls(allocator) catch {
@@ -243,6 +232,8 @@ fn printUsage() void {
         \\  --zig-path <path>        Path to zig binary (required with --allow-command-tools)
         \\  --zvm-path <path>        Path to zvm binary (optional, enables zig_manage)
         \\  --allow-command-tools    Enable command execution tools (disabled by default)
+        \\  --allow-untrusted-binaries
+        \\                           Allow binaries outside trusted dirs (/usr/bin, /usr/local/bin, /opt/homebrew/bin, $HOME/bin)
         \\  --help, -h               Show this help message
         \\  --version                Show version
         \\
@@ -260,4 +251,31 @@ fn printUsage() void {
         \\  }}
         \\
     , .{});
+}
+
+fn validateBinaryPath(allocator: std.mem.Allocator, path: []const u8, comptime name: []const u8, allow_untrusted: bool) ![]const u8 {
+    if (!std.fs.path.isAbsolute(path)) {
+        std.debug.print("[zig-mcp] Error: --{s}-path must be an absolute path\n", .{name});
+        std.process.exit(1);
+    }
+
+    const canonical = std.fs.cwd().realpathAlloc(allocator, path) catch {
+        std.debug.print("[zig-mcp] Error: --{s}-path does not exist or is not accessible: {s}\n", .{ name, path });
+        std.process.exit(1);
+    };
+    errdefer allocator.free(canonical);
+
+    if (!allow_untrusted) {
+        const home = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+        defer if (home) |h| allocator.free(h);
+        if (!binary_policy.isTrustedBinaryPath(canonical, home)) {
+            std.debug.print(
+                "[zig-mcp] Error: --{s}-path is outside trusted dirs. Use --allow-untrusted-binaries to override.\n",
+                .{name},
+            );
+            std.process.exit(1);
+        }
+    }
+
+    return canonical;
 }

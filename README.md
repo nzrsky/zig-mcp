@@ -114,6 +114,8 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 --zig-path <path>        Path to zig binary (required with --allow-command-tools)
 --zvm-path <path>        Path to zvm binary (optional, enables zig_manage)
 --allow-command-tools    Enable command execution tools (disabled by default)
+--allow-untrusted-binaries
+                        Allow binaries outside trusted dirs (/usr/bin, /usr/local/bin, /opt/homebrew/bin, $HOME/bin)
 --help, -h               Show help
 --version                Show version
 ```
