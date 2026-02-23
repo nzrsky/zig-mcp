@@ -83,6 +83,31 @@ pub fn resolvePath(allocator: std.mem.Allocator, workspace: []const u8, relative
     return std.fs.path.join(allocator, &.{ workspace, relative });
 }
 
+/// Resolve a path and enforce that it stays within the canonical workspace root.
+/// Returns canonical absolute path on success.
+pub fn resolvePathWithinWorkspace(allocator: std.mem.Allocator, workspace: []const u8, file_path: []const u8) ![]const u8 {
+    const abs_path = try resolvePath(allocator, workspace, file_path);
+    defer allocator.free(abs_path);
+
+    const canonical_workspace = try std.fs.cwd().realpathAlloc(allocator, workspace);
+    defer allocator.free(canonical_workspace);
+
+    const canonical_path = try std.fs.cwd().realpathAlloc(allocator, abs_path);
+    errdefer allocator.free(canonical_path);
+
+    if (!isWithinRoot(canonical_workspace, canonical_path)) {
+        return error.PathOutsideWorkspace;
+    }
+
+    return canonical_path;
+}
+
+fn isWithinRoot(root: []const u8, path: []const u8) bool {
+    if (std.mem.eql(u8, root, "/")) return std.mem.startsWith(u8, path, "/");
+    if (!std.mem.startsWith(u8, path, root)) return false;
+    return path.len == root.len or path[root.len] == '/';
+}
+
 fn needsEncoding(c: u8) bool {
     return switch (c) {
         'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~', '/', ':' => false,
@@ -168,6 +193,23 @@ test "resolvePath joins relative to workspace" {
     const result = try resolvePath(allocator, "/workspace", "src/main.zig");
     defer allocator.free(result);
     try std.testing.expectEqualStrings("/workspace/src/main.zig", result);
+}
+
+test "resolvePathWithinWorkspace accepts path inside root" {
+    const allocator = std.testing.allocator;
+    const result = try resolvePathWithinWorkspace(allocator, "/tmp", "/tmp");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("/tmp", result);
+}
+
+test "resolvePathWithinWorkspace rejects absolute path outside root" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.PathOutsideWorkspace, resolvePathWithinWorkspace(allocator, "/tmp", "/etc/passwd"));
+}
+
+test "resolvePathWithinWorkspace rejects traversal outside root" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.PathOutsideWorkspace, resolvePathWithinWorkspace(allocator, "/tmp", "/tmp/../etc/passwd"));
 }
 
 test "uri with spaces" {

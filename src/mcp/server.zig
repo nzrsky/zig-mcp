@@ -279,6 +279,7 @@ pub const McpServer = struct {
             error.NoResponse => "No response from ZLS",
             error.FileNotFound => "File not found",
             error.FileReadError => "Could not read file",
+            error.PathOutsideWorkspace => "Path is outside workspace",
             error.CommandFailed => "Command execution failed",
             error.ZlsNotRunning => "ZLS is not running",
             error.OutOfMemory => "Out of memory",

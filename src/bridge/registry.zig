@@ -24,6 +24,7 @@ pub const ToolError = error{
     NoResponse,
     FileNotFound,
     FileReadError,
+    PathOutsideWorkspace,
     OutOfMemory,
     CommandFailed,
     ZlsNotRunning,
