@@ -34,6 +34,9 @@ pub const McpServer = struct {
     allocator: std.mem.Allocator,
     zls_process: ?*ZlsProcess = null,
     allow_command_tools: bool = false,
+    zig_path: ?[]const u8 = null,
+    zvm_path: ?[]const u8 = null,
+    zls_path: ?[]const u8 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -43,6 +46,9 @@ pub const McpServer = struct {
         doc_state: *DocumentState,
         workspace: *const Workspace,
         allow_command_tools: bool,
+        zig_path: ?[]const u8,
+        zvm_path: ?[]const u8,
+        zls_path: ?[]const u8,
     ) McpServer {
         return .{
             .transport = transport,
@@ -52,6 +58,9 @@ pub const McpServer = struct {
             .workspace = workspace,
             .allocator = allocator,
             .allow_command_tools = allow_command_tools,
+            .zig_path = zig_path,
+            .zvm_path = zvm_path,
+            .zls_path = zls_path,
         };
     }
 
@@ -291,6 +300,9 @@ pub const McpServer = struct {
             .workspace = self.workspace,
             .allocator = allocator,
             .allow_command_tools = self.allow_command_tools,
+            .zig_path = self.zig_path,
+            .zvm_path = self.zvm_path,
+            .zls_path = self.zls_path,
         };
 
         const result_text = handler(ctx, tool_args) catch |err| {

@@ -13,7 +13,7 @@ AI assistant  <--(MCP stdio)-->  zig-mcp  <--(LSP pipes)-->  ZLS
 ## Requirements
 
 - [Zig](https://ziglang.org/download/) 0.15.2+
-- [ZLS](https://github.com/zigtools/zls/releases) (auto-detected from PATH, or specify with `--zls-path`)
+- [ZLS](https://github.com/zigtools/zls/releases) (auto-detected from trusted fixed locations, or specify with `--zls-path`)
 
 ## Install
 
@@ -110,7 +110,9 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 
 ```
 --workspace, -w <path>   Project root directory (default: cwd)
---zls-path <path>        Path to ZLS binary (default: auto-detect from PATH)
+--zls-path <path>        Path to ZLS binary (default: trusted fixed locations)
+--zig-path <path>        Path to zig binary (required with --allow-command-tools)
+--zvm-path <path>        Path to zvm binary (optional, enables zig_manage)
 --allow-command-tools    Enable command execution tools (disabled by default)
 --help, -h               Show help
 --version                Show version
