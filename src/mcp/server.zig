@@ -14,8 +14,14 @@ const log = std.log.scoped(.mcp_server);
 /// MCP server state machine.
 pub const State = enum {
     uninitialized,
+    initializing,
     running,
     shutdown,
+};
+
+const supported_protocol_versions = [_][]const u8{
+    "2025-06-18",
+    "2024-11-05",
 };
 
 pub const McpServer = struct {
@@ -112,8 +118,23 @@ pub const McpServer = struct {
         const params = obj.get("params") orelse .null;
 
         // Dispatch
+        if (self.state == .uninitialized and !methodAllowedBeforeInitialize(method)) {
+            if (id) |rid| {
+                const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.server_not_initialized, "Server not initialized");
+                try self.transport.writeMessage(resp);
+            }
+            return;
+        }
+        if (self.state == .initializing and !methodAllowedDuringInitialize(method)) {
+            if (id) |rid| {
+                const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.server_not_initialized, "Server not initialized");
+                try self.transport.writeMessage(resp);
+            }
+            return;
+        }
+
         if (std.mem.eql(u8, method, "initialize")) {
-            try self.handleInitialize(allocator, id);
+            try self.handleInitialize(allocator, id, params);
         } else if (std.mem.eql(u8, method, "notifications/initialized") or std.mem.eql(u8, method, "initialized")) {
             // No response needed
             self.state = .running;
@@ -143,11 +164,27 @@ pub const McpServer = struct {
         }
     }
 
-    fn handleInitialize(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId) !void {
+    fn handleInitialize(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId, params: std.json.Value) !void {
         const rid = id orelse return;
+        if (self.state != .uninitialized) {
+            const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.invalid_request, "Server already initialized");
+            try self.transport.writeMessage(resp);
+            return;
+        }
+
+        const protocol_version = negotiateProtocolVersion(params) catch |err| {
+            const msg = switch (err) {
+                error.InvalidParams => "Missing or invalid protocolVersion",
+                error.UnsupportedProtocolVersion => "Unsupported protocolVersion",
+                else => "Invalid initialize params",
+            };
+            const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.invalid_params, msg);
+            try self.transport.writeMessage(resp);
+            return;
+        };
 
         const result = mcp_types.InitializeResult{
-            .protocolVersion = "2024-11-05",
+            .protocolVersion = protocol_version,
             .capabilities = .{
                 .tools = .{},
                 .resources = .{},
@@ -160,7 +197,7 @@ pub const McpServer = struct {
 
         const resp = try json_rpc.writeResponse(allocator, rid, result);
         try self.transport.writeMessage(resp);
-        self.state = .running;
+        self.state = .initializing;
     }
 
     fn handleToolsList(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId) !void {
@@ -372,3 +409,56 @@ pub const McpServer = struct {
         try self.transport.writeMessage(resp);
     }
 };
+
+fn methodAllowedBeforeInitialize(method: []const u8) bool {
+    return std.mem.eql(u8, method, "initialize") or
+        std.mem.eql(u8, method, "ping") or
+        std.mem.eql(u8, method, "shutdown");
+}
+
+fn methodAllowedDuringInitialize(method: []const u8) bool {
+    return std.mem.eql(u8, method, "notifications/initialized") or
+        std.mem.eql(u8, method, "initialized") or
+        std.mem.eql(u8, method, "ping") or
+        std.mem.eql(u8, method, "shutdown");
+}
+
+fn negotiateProtocolVersion(params: std.json.Value) ![]const u8 {
+    const obj = switch (params) {
+        .object => |o| o,
+        else => return error.InvalidParams,
+    };
+    const client_version = switch (obj.get("protocolVersion") orelse return error.InvalidParams) {
+        .string => |s| s,
+        else => return error.InvalidParams,
+    };
+    for (supported_protocol_versions) |version| {
+        if (std.mem.eql(u8, version, client_version)) return version;
+    }
+    return error.UnsupportedProtocolVersion;
+}
+
+test "negotiateProtocolVersion accepts supported versions" {
+    const alloc = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, "{\"protocolVersion\":\"2025-06-18\"}", .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("2025-06-18", try negotiateProtocolVersion(parsed.value));
+}
+
+test "negotiateProtocolVersion rejects unsupported version" {
+    const alloc = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, "{\"protocolVersion\":\"2020-01-01\"}", .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.UnsupportedProtocolVersion, negotiateProtocolVersion(parsed.value));
+}
+
+test "method gating before initialize" {
+    try std.testing.expect(methodAllowedBeforeInitialize("initialize"));
+    try std.testing.expect(methodAllowedBeforeInitialize("ping"));
+    try std.testing.expect(!methodAllowedBeforeInitialize("tools/call"));
+}
+
+test "method gating during initialize" {
+    try std.testing.expect(methodAllowedDuringInitialize("initialized"));
+    try std.testing.expect(!methodAllowedDuringInitialize("tools/list"));
+}
