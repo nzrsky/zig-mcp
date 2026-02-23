@@ -38,7 +38,17 @@ pub const McpTransport = struct {
                 if (byte[0] == '\n') break;
                 if (byte[0] == '\r') continue; // skip CR
                 try line.append(allocator, byte[0]);
-                if (line.items.len > 1024 * 1024) return error.MessageTooLarge;
+                if (line.items.len > 1024 * 1024) {
+                    // Drain the rest of this line so the next read starts at the next message.
+                    while (true) {
+                        const n2 = self.stdin_file.read(&byte) catch |err| switch (err) {
+                            error.BrokenPipe => break,
+                            else => return err,
+                        };
+                        if (n2 == 0 or byte[0] == '\n') break;
+                    }
+                    return error.MessageTooLarge;
+                }
             }
 
             if (line.items.len == 0) continue; // ignore blank lines
@@ -72,4 +82,30 @@ test "readMessage ignores blank lines" {
     const msg = (try transport.readMessage(alloc)).?;
     defer alloc.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "\"method\":\"ping\"") != null);
+}
+
+test "readMessage drains oversized line and reads next message" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("mcp_oversize.txt", .{ .read = true, .truncate = true });
+    defer file.close();
+
+    const oversized = try alloc.alloc(u8, 1024 * 1024 + 2);
+    defer alloc.free(oversized);
+    @memset(oversized, 'a');
+    oversized[oversized.len - 1] = '\n';
+    try file.writeAll(oversized);
+    try file.writeAll("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n");
+    try file.seekTo(0);
+
+    var transport = McpTransport.init();
+    transport.stdin_file = file;
+
+    try std.testing.expectError(error.MessageTooLarge, transport.readMessage(alloc));
+
+    const msg = (try transport.readMessage(alloc)).?;
+    defer alloc.free(msg);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "\"id\":2") != null);
 }

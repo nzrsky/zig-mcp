@@ -67,7 +67,15 @@ pub const McpServer = struct {
     /// Main loop: read MCP messages, dispatch, respond.
     pub fn run(self: *McpServer) !void {
         while (self.state != .shutdown) {
-            const msg_data = try self.transport.readMessage(self.allocator);
+            const msg_data = self.transport.readMessage(self.allocator) catch |err| {
+                if (isRecoverableTransportError(err)) {
+                    const error_resp = try json_rpc.writeError(self.allocator, null, json_rpc.ErrorCode.parse_error, "Message too large");
+                    defer self.allocator.free(error_resp);
+                    self.transport.writeMessage(error_resp) catch {};
+                    continue;
+                }
+                return err;
+            };
             if (msg_data == null) {
                 // stdin EOF — clean shutdown
                 break;
@@ -427,6 +435,10 @@ pub const McpServer = struct {
     }
 };
 
+fn isRecoverableTransportError(err: anytype) bool {
+    return err == error.MessageTooLarge;
+}
+
 fn methodAllowedBeforeInitialize(method: []const u8) bool {
     return std.mem.eql(u8, method, "initialize") or
         std.mem.eql(u8, method, "ping") or
@@ -478,4 +490,9 @@ test "method gating before initialize" {
 test "method gating during initialize" {
     try std.testing.expect(methodAllowedDuringInitialize("initialized"));
     try std.testing.expect(!methodAllowedDuringInitialize("tools/list"));
+}
+
+test "isRecoverableTransportError handles oversized messages" {
+    try std.testing.expect(isRecoverableTransportError(error.MessageTooLarge));
+    try std.testing.expect(!isRecoverableTransportError(error.OutOfMemory));
 }
