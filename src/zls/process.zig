@@ -147,29 +147,9 @@ test "ZlsProcess max restart count" {
     try std.testing.expect(!can_restart);
 }
 
-/// Find ZLS binary. Checks: explicit path, PATH lookup, common locations.
+/// Find ZLS binary in trusted fixed locations.
 pub fn findZls(allocator: std.mem.Allocator) ![]const u8 {
-    // Try PATH first
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "which", "zls" },
-    });
-    if (result) |r| {
-        defer allocator.free(r.stderr);
-        if (r.term == .Exited and r.term.Exited == 0 and r.stdout.len > 0) {
-            // Trim trailing newline
-            const trimmed = std.mem.trimRight(u8, r.stdout, "\n\r ");
-            const path = allocator.dupe(u8, trimmed) catch {
-                allocator.free(r.stdout);
-                return error.OutOfMemory;
-            };
-            allocator.free(r.stdout);
-            return path;
-        }
-        allocator.free(r.stdout);
-    } else |_| {}
-
-    // Common locations
+    // Trusted fixed locations
     const common_paths = [_][]const u8{
         "/usr/local/bin/zls",
         "/usr/bin/zls",

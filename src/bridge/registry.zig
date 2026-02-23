@@ -12,6 +12,9 @@ pub const ToolContext = struct {
     workspace: *const Workspace,
     allocator: std.mem.Allocator,
     allow_command_tools: bool,
+    zig_path: ?[]const u8,
+    zvm_path: ?[]const u8,
+    zls_path: ?[]const u8,
 };
 
 /// A tool handler function.
