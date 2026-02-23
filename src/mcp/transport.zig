@@ -18,32 +18,32 @@ pub const McpTransport = struct {
     /// Read one newline-delimited JSON message from stdin.
     /// Returns owned slice allocated with `allocator`, or null on EOF.
     pub fn readMessage(self: *McpTransport, allocator: std.mem.Allocator) !?[]const u8 {
-        _ = self;
-        // Read line from stdin. We can't use the new buffered reader here
-        // because we need to hand back owned memory. Read byte-by-byte into ArrayList.
-        var line: std.ArrayList(u8) = .empty;
-        errdefer line.deinit(allocator);
-
-        const stdin = std.fs.File.stdin();
         while (true) {
-            var byte: [1]u8 = undefined;
-            const n = stdin.read(&byte) catch |err| switch (err) {
-                error.BrokenPipe => return null,
-                else => return err,
-            };
-            if (n == 0) {
-                // EOF
-                if (line.items.len == 0) return null;
-                break;
-            }
-            if (byte[0] == '\n') break;
-            if (byte[0] == '\r') continue; // skip CR
-            try line.append(allocator, byte[0]);
-            if (line.items.len > 1024 * 1024) return error.MessageTooLarge;
-        }
+            // Read line from stdin_file. We can't use a buffered reader here
+            // because we need to hand back owned memory.
+            var line: std.ArrayList(u8) = .empty;
+            errdefer line.deinit(allocator);
 
-        if (line.items.len == 0) return null;
-        return try line.toOwnedSlice(allocator);
+            while (true) {
+                var byte: [1]u8 = undefined;
+                const n = self.stdin_file.read(&byte) catch |err| switch (err) {
+                    error.BrokenPipe => return null,
+                    else => return err,
+                };
+                if (n == 0) {
+                    // EOF
+                    if (line.items.len == 0) return null;
+                    break;
+                }
+                if (byte[0] == '\n') break;
+                if (byte[0] == '\r') continue; // skip CR
+                try line.append(allocator, byte[0]);
+                if (line.items.len > 1024 * 1024) return error.MessageTooLarge;
+            }
+
+            if (line.items.len == 0) continue; // ignore blank lines
+            return try line.toOwnedSlice(allocator);
+        }
     }
 
     /// Write a newline-delimited JSON message to stdout.
@@ -55,3 +55,21 @@ pub const McpTransport = struct {
         try self.stdout_file.writeAll("\n");
     }
 };
+
+test "readMessage ignores blank lines" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("mcp_input.txt", .{ .read = true, .truncate = true });
+    defer file.close();
+    try file.writeAll("\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n");
+    try file.seekTo(0);
+
+    var transport = McpTransport.init();
+    transport.stdin_file = file;
+
+    const msg = (try transport.readMessage(alloc)).?;
+    defer alloc.free(msg);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "\"method\":\"ping\"") != null);
+}
