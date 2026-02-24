@@ -21,6 +21,7 @@ pub const State = enum {
 
 const supported_protocol_versions = [_][]const u8{
     "2025-06-18",
+    "2025-03-26",
     "2024-11-05",
 };
 
