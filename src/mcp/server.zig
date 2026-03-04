@@ -92,7 +92,7 @@ pub const McpServer = struct {
             const arena_alloc = arena.allocator();
 
             self.handleMessage(arena_alloc, data) catch |err| {
-                std.debug.print("[zig-mcp] Error handling message: {}\n", .{err});
+                log.err("Error handling message: {}", .{err});
                 // Try to send error response
                 const error_resp = json_rpc.writeError(arena_alloc, null, json_rpc.ErrorCode.internal_error, "Internal error") catch continue;
                 self.transport.writeMessage(error_resp) catch {};
@@ -390,18 +390,18 @@ pub const McpServer = struct {
     fn tryReconnectZls(self: *McpServer) bool {
         const zls_proc = self.zls_process orelse return false;
 
-        std.debug.print("[zig-mcp] Attempting ZLS reconnection...\n", .{});
+        log.info("Attempting ZLS reconnection...", .{});
 
         // Disconnect old LSP session (closes old pipes, joins threads)
         self.lsp_client.disconnect();
 
         // Respawn ZLS
         const restarted = zls_proc.restart() catch {
-            std.debug.print("[zig-mcp] ZLS restart failed\n", .{});
+            log.err("ZLS restart failed", .{});
             return false;
         };
         if (!restarted) {
-            std.debug.print("[zig-mcp] ZLS max restarts exceeded\n", .{});
+            log.warn("ZLS max restarts exceeded", .{});
             return false;
         }
 
@@ -411,14 +411,14 @@ pub const McpServer = struct {
         const zls_stderr = zls_proc.getStderr();
 
         self.lsp_client.connect(zls_stdin, zls_stdout, zls_stderr) catch {
-            std.debug.print("[zig-mcp] Failed to connect to restarted ZLS\n", .{});
+            log.err("Failed to connect to restarted ZLS", .{});
             return false;
         };
         zls_proc.detachPipes();
 
         // Re-initialize LSP session
         const init_response = self.lsp_client.initialize(self.allocator, self.workspace.root_uri) catch {
-            std.debug.print("[zig-mcp] LSP re-initialize failed\n", .{});
+            log.err("LSP re-initialize failed", .{});
             return false;
         };
         self.allocator.free(init_response);
@@ -426,7 +426,7 @@ pub const McpServer = struct {
         // Reopen tracked documents
         self.doc_state.reopenAll(self.lsp_client);
 
-        std.debug.print("[zig-mcp] ZLS reconnected successfully\n", .{});
+        log.info("ZLS reconnected successfully", .{});
         return true;
     }
 

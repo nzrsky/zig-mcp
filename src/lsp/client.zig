@@ -246,9 +246,9 @@ pub const LspClient = struct {
         const duped = try allocator.dupe(u8, response);
 
         // Parse server capabilities from the initialize response
-        log("raw initialize response: {s}", .{response});
+        log.debug("raw initialize response: {s}", .{response});
         self.server_capabilities = parseServerCapabilities(self.allocator, response);
-        log("server capabilities: hover={}, definition={}, declaration={}, typeDefinition={}, references={}, completion={}, rename={}, documentSymbol={}, workspaceSymbol={}, codeAction={}, signatureHelp={}, formatting={}", .{
+        log.info("server capabilities: hover={}, definition={}, declaration={}, typeDefinition={}, references={}, completion={}, rename={}, documentSymbol={}, workspaceSymbol={}, codeAction={}, signatureHelp={}, formatting={}", .{
             self.server_capabilities.hover,
             self.server_capabilities.definition,
             self.server_capabilities.declaration,
@@ -301,13 +301,13 @@ pub const LspClient = struct {
 
         while (self.running.load(.acquire)) {
             const msg = reader.readMessage(self.allocator) catch |err| {
-                log("LSP reader error: {}", .{err});
+                log.err("LSP reader error: {}", .{err});
                 self.signalAllPending();
                 return;
             };
             if (msg == null) {
                 // ZLS closed stdout (crashed or exited)
-                log("ZLS stdout closed", .{});
+                log.info("ZLS stdout closed", .{});
                 self.signalAllPending();
                 return;
             }
@@ -316,7 +316,7 @@ pub const LspClient = struct {
 
             // Parse to check if it's a response (has "id") or notification (has "method")
             const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, data, .{}) catch {
-                log("Failed to parse LSP message", .{});
+                log.warn("Failed to parse LSP message", .{});
                 continue;
             };
             defer parsed.deinit();
@@ -374,7 +374,7 @@ pub const LspClient = struct {
         while (true) {
             const n = stderr.read(&buf) catch return;
             if (n == 0) return;
-            log("ZLS stderr: {s}", .{buf[0..n]});
+            log.debug("ZLS stderr: {s}", .{buf[0..n]});
         }
     }
 
@@ -439,13 +439,13 @@ pub const LspClient = struct {
 
         // Send shutdown request (expects a response)
         _ = self.sendRequest(alloc, "shutdown", null) catch {
-            log("LSP shutdown request failed", .{});
+            log.warn("LSP shutdown request failed", .{});
             return;
         };
 
         // Send exit notification (no response expected)
         self.sendNotification(alloc, "exit", null) catch {
-            log("LSP exit notification failed", .{});
+            log.warn("LSP exit notification failed", .{});
         };
     }
 
@@ -469,9 +469,7 @@ pub const LspClient = struct {
         self.diagnostics_waiters.deinit(self.allocator);
     }
 
-    fn log(comptime fmt: []const u8, args: anytype) void {
-        std.debug.print("[zig-mcp/lsp] " ++ fmt ++ "\n", args);
-    }
+    const log = std.log.scoped(.lsp);
 };
 
 /// Parse server capabilities from the JSON-RPC initialize response.

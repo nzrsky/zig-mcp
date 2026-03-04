@@ -34,6 +34,8 @@ comptime {
     _ = @import("security/binary_policy.zig");
 }
 
+const log = std.log.scoped(.default);
+
 pub const std_options: std.Options = .{
     .log_level = .info,
     .logFn = logToStderr,
@@ -96,18 +98,18 @@ pub fn main() !void {
     // Default workspace to cwd
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const ws_path = workspace_path orelse (std.process.getCwd(&cwd_buf) catch {
-        std.debug.print("Error: could not determine workspace path. Use --workspace <path>\n", .{});
+        log.err("could not determine workspace path. Use --workspace <path>", .{});
         std.process.exit(1);
     });
 
     // Initialize workspace
     var workspace = Workspace.init(allocator, ws_path) catch {
-        std.debug.print("Error: could not initialize workspace at '{s}'\n", .{ws_path});
+        log.err("could not initialize workspace at '{s}'", .{ws_path});
         std.process.exit(1);
     };
     defer workspace.deinit();
 
-    std.debug.print("[zig-mcp] Workspace: {s}\n", .{workspace.root_path});
+    log.info("Workspace: {s}", .{workspace.root_path});
 
     const zig_path = if (zig_path_arg) |p|
         try validateBinaryPath(allocator, p, "zig", allow_untrusted_binaries)
@@ -122,7 +124,7 @@ pub fn main() !void {
     defer if (zvm_path) |p| allocator.free(p);
 
     if (allow_command_tools and zig_path == null) {
-        std.debug.print("[zig-mcp] Error: --allow-command-tools requires --zig-path <absolute path>\n", .{});
+        log.err("--allow-command-tools requires --zig-path <absolute path>", .{});
         std.process.exit(1);
     }
 
@@ -132,20 +134,20 @@ pub fn main() !void {
     }
     else
         findZls(allocator) catch {
-            std.debug.print("[zig-mcp] Warning: ZLS not found. LSP-backed tools will not work.\n", .{});
-            std.debug.print("[zig-mcp] Install ZLS or specify --zls-path <path>\n", .{});
+            log.warn("ZLS not found. LSP-backed tools will not work.", .{});
+            log.warn("Install ZLS or specify --zls-path <path>", .{});
             // Continue without ZLS — command tools still work
             return runWithoutZls(allocator, &workspace, allow_command_tools, zig_path, zvm_path, null);
         };
     defer allocator.free(zls_path);
-    std.debug.print("[zig-mcp] ZLS: {s}\n", .{zls_path});
+    log.info("ZLS: {s}", .{zls_path});
 
     // Spawn ZLS
     var zls_proc = ZlsProcess.init(allocator, workspace.root_path, zls_path);
     defer zls_proc.deinit();
 
     zls_proc.spawn() catch |err| {
-        std.debug.print("[zig-mcp] Failed to spawn ZLS: {}\n", .{err});
+        log.err("Failed to spawn ZLS: {}", .{err});
         return runWithoutZls(allocator, &workspace, allow_command_tools, zig_path, zvm_path, null);
     };
 
@@ -154,11 +156,11 @@ pub fn main() !void {
     defer lsp_client.deinit();
 
     const zls_stdin = zls_proc.getStdin() orelse {
-        std.debug.print("[zig-mcp] Failed to get ZLS stdin pipe\n", .{});
+        log.err("Failed to get ZLS stdin pipe", .{});
         std.process.exit(1);
     };
     const zls_stdout = zls_proc.getStdout() orelse {
-        std.debug.print("[zig-mcp] Failed to get ZLS stdout pipe\n", .{});
+        log.err("Failed to get ZLS stdout pipe", .{});
         std.process.exit(1);
     };
 
@@ -169,13 +171,13 @@ pub fn main() !void {
     zls_proc.detachPipes();
 
     // LSP initialize handshake
-    std.debug.print("[zig-mcp] Initializing LSP session...\n", .{});
+    log.info("Initializing LSP session...", .{});
     const init_response = lsp_client.initialize(allocator, workspace.root_uri) catch |err| {
-        std.debug.print("[zig-mcp] LSP initialize failed: {}\n", .{err});
+        log.err("LSP initialize failed: {}", .{err});
         return runWithoutZls(allocator, &workspace, allow_command_tools, zig_path, zvm_path, zls_path);
     };
     allocator.free(init_response);
-    std.debug.print("[zig-mcp] LSP session initialized\n", .{});
+    log.info("LSP session initialized", .{});
 
     // Initialize document state
     var doc_state = DocumentState.init(allocator, workspace.root_path);
@@ -192,10 +194,10 @@ pub fn main() !void {
     // Run MCP server (with ZLS process for auto-reconnect on crash)
     var server = McpServer.init(allocator, &transport, &registry, &lsp_client, &doc_state, &workspace, allow_command_tools, zig_path, zvm_path, zls_path);
     server.zls_process = &zls_proc;
-    std.debug.print("[zig-mcp] Server ready, waiting for MCP messages on stdin\n", .{});
+    log.info("Server ready, waiting for MCP messages on stdin", .{});
     try server.run();
 
-    std.debug.print("[zig-mcp] Server shutting down\n", .{});
+    log.info("Server shutting down", .{});
 }
 
 /// Run in degraded mode without ZLS (command tools only).
@@ -219,7 +221,7 @@ fn runWithoutZls(
 
     var transport = McpTransport.init();
     var server = McpServer.init(allocator, &transport, &registry, &lsp_client, &doc_state, workspace, allow_command_tools, zig_path, zvm_path, zls_path);
-    std.debug.print("[zig-mcp] Running without ZLS (command tools only)\n", .{});
+    log.info("Running without ZLS (command tools only)", .{});
     try server.run();
 }
 
@@ -258,12 +260,12 @@ fn printUsage() void {
 
 fn validateBinaryPath(allocator: std.mem.Allocator, path: []const u8, comptime name: []const u8, allow_untrusted: bool) ![]const u8 {
     if (!std.fs.path.isAbsolute(path)) {
-        std.debug.print("[zig-mcp] Error: --{s}-path must be an absolute path\n", .{name});
+        log.err("--{s}-path must be an absolute path", .{name});
         std.process.exit(1);
     }
 
     const canonical = std.fs.cwd().realpathAlloc(allocator, path) catch {
-        std.debug.print("[zig-mcp] Error: --{s}-path does not exist or is not accessible: {s}\n", .{ name, path });
+        log.err("--{s}-path does not exist or is not accessible: {s}", .{ name, path });
         std.process.exit(1);
     };
     errdefer allocator.free(canonical);
@@ -272,10 +274,7 @@ fn validateBinaryPath(allocator: std.mem.Allocator, path: []const u8, comptime n
         const home = std.process.getEnvVarOwned(allocator, "HOME") catch null;
         defer if (home) |h| allocator.free(h);
         if (!binary_policy.isTrustedBinaryPath(canonical, home)) {
-            std.debug.print(
-                "[zig-mcp] Error: --{s}-path is outside trusted dirs. Use --allow-untrusted-binaries to override.\n",
-                .{name},
-            );
+            log.err("--{s}-path is outside trusted dirs. Use --allow-untrusted-binaries to override.", .{name});
             std.process.exit(1);
         }
     }

@@ -2,6 +2,8 @@ const std = @import("std");
 const LspClient = @import("../lsp/client.zig").LspClient;
 const uri_util = @import("../types/uri.zig");
 
+const log = std.log.scoped(.docs);
+
 /// Tracks which documents are open in the LSP session.
 /// Sends didOpen/didClose notifications as needed.
 pub const DocumentState = struct {
@@ -124,7 +126,7 @@ pub const DocumentState = struct {
             lsp_client.sendNotification(arena.allocator(), "textDocument/didClose", CloseParams{
                 .textDocument = .{ .uri = file_uri },
             }) catch |err| {
-                std.debug.print("[zig-mcp/docs] didClose notification failed: {}\n", .{err});
+                log.warn("didClose notification failed: {}", .{err});
             };
 
             self.allocator.free(kv.key);
@@ -142,13 +144,13 @@ pub const DocumentState = struct {
 
             // Convert URI back to path for re-reading (handles percent-encoding)
             const path = uri_util.uriToPath(self.allocator, uri) catch {
-                std.debug.print("[zig-mcp/docs] Failed to decode URI {s} for reopen\n", .{uri});
+                log.err("Failed to decode URI {s} for reopen", .{uri});
                 continue;
             };
             defer self.allocator.free(path);
 
             const content = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch {
-                std.debug.print("[zig-mcp/docs] Failed to re-read {s} for reopen\n", .{path});
+                log.err("Failed to re-read {s} for reopen", .{path});
                 continue;
             };
             defer self.allocator.free(content);
@@ -173,7 +175,7 @@ pub const DocumentState = struct {
                     .text = content,
                 },
             }) catch |err| {
-                std.debug.print("[zig-mcp/docs] Failed to reopen {s}: {}\n", .{ path, err });
+                log.err("Failed to reopen {s}: {}", .{ path, err });
             };
         }
     }
