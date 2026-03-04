@@ -174,6 +174,8 @@ pub const McpServer = struct {
             try self.handleToolsCall(allocator, id, params);
         } else if (std.mem.eql(u8, method, "resources/list")) {
             try self.handleResourcesList(allocator, id);
+        } else if (std.mem.eql(u8, method, "prompts/list")) {
+            try self.handlePromptsList(allocator, id);
         } else if (std.mem.eql(u8, method, "ping")) {
             if (id) |rid| {
                 const resp = try json_rpc.writeResponse(allocator, rid, .{});
@@ -435,6 +437,12 @@ pub const McpServer = struct {
         const resp = try writeResourcesListResponse(allocator, rid);
         try self.transport.writeMessage(resp);
     }
+
+    fn handlePromptsList(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId) !void {
+        const rid = id orelse return;
+        const resp = try writePromptsListResponse(allocator, rid);
+        try self.transport.writeMessage(resp);
+    }
 };
 
 fn isRecoverableTransportError(err: anytype) bool {
@@ -453,6 +461,7 @@ fn methodAllowedDuringInitialize(method: []const u8) bool {
         std.mem.eql(u8, method, "tools/list") or
         std.mem.eql(u8, method, "tools/call") or
         std.mem.eql(u8, method, "resources/list") or
+        std.mem.eql(u8, method, "prompts/list") or
         std.mem.eql(u8, method, "ping") or
         std.mem.eql(u8, method, "shutdown");
 }
@@ -460,6 +469,11 @@ fn methodAllowedDuringInitialize(method: []const u8) bool {
 fn writeResourcesListResponse(allocator: std.mem.Allocator, id: json_rpc.RequestId) ![]const u8 {
     const empty_resources: []const mcp_types.Resource = &.{};
     return json_rpc.writeResponse(allocator, id, .{ .resources = empty_resources });
+}
+
+fn writePromptsListResponse(allocator: std.mem.Allocator, id: json_rpc.RequestId) ![]const u8 {
+    const empty_prompts: []const u0 = &.{};
+    return json_rpc.writeResponse(allocator, id, .{ .prompts = empty_prompts });
 }
 
 fn negotiateProtocolVersion(params: std.json.Value) ![]const u8 {
@@ -502,11 +516,26 @@ test "method gating during initialize" {
     try std.testing.expect(methodAllowedDuringInitialize("tools/list"));
     try std.testing.expect(methodAllowedDuringInitialize("tools/call"));
     try std.testing.expect(methodAllowedDuringInitialize("resources/list"));
+    try std.testing.expect(methodAllowedDuringInitialize("prompts/list"));
 }
 
 test "isRecoverableTransportError handles oversized messages" {
     try std.testing.expect(isRecoverableTransportError(error.MessageTooLarge));
     try std.testing.expect(!isRecoverableTransportError(error.OutOfMemory));
+}
+
+test "prompts/list response uses array shape" {
+    const alloc = std.testing.allocator;
+    const resp = try writePromptsListResponse(alloc, .{ .integer = 1 });
+    defer alloc.free(resp);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    const result = obj.get("result").?.object;
+    try std.testing.expect(result.get("prompts").? == .array);
+    try std.testing.expectEqual(@as(usize, 0), result.get("prompts").?.array.items.len);
 }
 
 test "resources/list response uses array shape" {
