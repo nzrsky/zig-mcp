@@ -399,6 +399,12 @@ pub const LspClient = struct {
     }
 
     pub fn disconnect(self: *LspClient) void {
+        // Send graceful LSP shutdown sequence before closing pipes.
+        // Best-effort: if anything fails, we still close pipes and join threads.
+        if (self.zls_stdin != null and self.running.load(.acquire)) {
+            self.gracefulShutdown();
+        }
+
         self.running.store(false, .release);
         // Close all pipes to signal ZLS to exit and unblock reader threads
         if (self.zls_stdin) |stdin| {
@@ -422,6 +428,25 @@ pub const LspClient = struct {
             t.join();
             self.stderr_thread = null;
         }
+    }
+
+    /// Send LSP shutdown request and exit notification.
+    /// Per the LSP spec, the server should be given a chance to clean up.
+    fn gracefulShutdown(self: *LspClient) void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        // Send shutdown request (expects a response)
+        _ = self.sendRequest(alloc, "shutdown", null) catch {
+            log("LSP shutdown request failed", .{});
+            return;
+        };
+
+        // Send exit notification (no response expected)
+        self.sendNotification(alloc, "exit", null) catch {
+            log("LSP exit notification failed", .{});
+        };
     }
 
     pub fn deinit(self: *LspClient) void {
