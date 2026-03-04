@@ -1,6 +1,7 @@
 const std = @import("std");
 const McpTransport = @import("mcp/transport.zig").McpTransport;
-const McpServer = @import("mcp/server.zig").McpServer;
+const mcp_server = @import("mcp/server.zig");
+const McpServer = mcp_server.McpServer;
 const lsp_client_mod = @import("lsp/client.zig");
 const LspClient = lsp_client_mod.LspClient;
 const ServerCapabilities = lsp_client_mod.ServerCapabilities;
@@ -87,7 +88,7 @@ pub fn main() !void {
             printUsage();
             return;
         } else if (std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("zig-mcp 0.1.0\n", .{});
+            std.debug.print("{s} {s}\n", .{ mcp_server.server_name, mcp_server.server_version });
             return;
         }
     }

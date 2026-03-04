@@ -11,6 +11,9 @@ const ZlsProcess = @import("../zls/process.zig").ZlsProcess;
 
 const log = std.log.scoped(.mcp_server);
 
+pub const server_name = "zig-mcp";
+pub const server_version = "0.1.0";
+
 /// MCP server state machine.
 pub const State = enum {
     uninitialized,
@@ -210,8 +213,8 @@ pub const McpServer = struct {
                 .resources = .{},
             },
             .serverInfo = .{
-                .name = "zig-mcp",
-                .version = "0.1.0",
+                .name = server_name,
+                .version = server_version,
             },
         };
 

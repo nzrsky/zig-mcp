@@ -44,23 +44,6 @@ pub const RequestId = union(enum) {
     }
 };
 
-/// Raw JSON-RPC message parsed from the wire. We keep `params`/`result`/`error`
-/// as raw JSON slices so each handler can parse them with the right types.
-pub const Message = struct {
-    jsonrpc: []const u8 = "2.0",
-    id: ?RequestId = null,
-    method: ?[]const u8 = null,
-    params: ?std.json.Value = null,
-    result: ?std.json.Value = null,
-    @"error": ?ErrorObject = null,
-};
-
-pub const ErrorObject = struct {
-    code: i64,
-    message: []const u8,
-    data: ?std.json.Value = null,
-};
-
 /// Standard JSON-RPC error codes.
 pub const ErrorCode = struct {
     pub const parse_error: i64 = -32700;
