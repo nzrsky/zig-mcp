@@ -468,7 +468,7 @@ fn handleCodeAction(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
             end: struct { line: i64, character: i64 },
         },
         context: struct {
-            diagnostics: []const u8 = &.{},
+            diagnostics: []const struct {} = &.{},
         },
     };
 

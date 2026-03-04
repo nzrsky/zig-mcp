@@ -176,7 +176,7 @@ pub const LspClient = struct {
             }
         }
         try aw.writer.writeAll(
-            \\","capabilities":{"textDocument":{"hover":{"contentFormat":["markdown","plaintext"]},"completion":{"completionItem":{"snippetSupport":false}},"signatureHelp":{"signatureInformation":{"documentationFormat":["markdown","plaintext"]}},"publishDiagnostics":{"relatedInformation":true},"definition":{"dynamicRegistration":false},"references":{"dynamicRegistration":false},"documentSymbol":{"dynamicRegistration":false},"codeAction":{"dynamicRegistration":false},"rename":{"dynamicRegistration":false}},"workspace":{"symbol":{"dynamicRegistration":false},"workspaceFolders":true}},"workspaceFolders":[{"uri":"
+            \\","capabilities":{"textDocument":{"hover":{"contentFormat":["markdown","plaintext"]},"completion":{"completionItem":{"snippetSupport":false}},"signatureHelp":{"signatureInformation":{"documentationFormat":["markdown","plaintext"]}},"publishDiagnostics":{"relatedInformation":true},"definition":{"dynamicRegistration":false},"declaration":{"dynamicRegistration":false},"typeDefinition":{"dynamicRegistration":false},"references":{"dynamicRegistration":false},"documentSymbol":{"dynamicRegistration":false},"codeAction":{"dynamicRegistration":false},"rename":{"dynamicRegistration":false}},"workspace":{"symbol":{"dynamicRegistration":false},"workspaceFolders":true}},"workspaceFolders":[{"uri":"
         );
         // Embed the workspace URI in the workspaceFolders array
         for (workspace_uri) |c| {
@@ -246,6 +246,7 @@ pub const LspClient = struct {
         const duped = try allocator.dupe(u8, response);
 
         // Parse server capabilities from the initialize response
+        log("raw initialize response: {s}", .{response});
         self.server_capabilities = parseServerCapabilities(self.allocator, response);
         log("server capabilities: hover={}, definition={}, declaration={}, typeDefinition={}, references={}, completion={}, rename={}, documentSymbol={}, workspaceSymbol={}, codeAction={}, signatureHelp={}, formatting={}", .{
             self.server_capabilities.hover,
