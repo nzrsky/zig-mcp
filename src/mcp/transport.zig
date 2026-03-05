@@ -18,13 +18,10 @@ pub const McpTransport = struct {
     /// Read one newline-delimited JSON message from stdin.
     /// Returns owned slice allocated with `allocator`, or null on EOF.
     pub fn readMessage(self: *McpTransport, allocator: std.mem.Allocator) !?[]const u8 {
-        _ = self;
-        // Read line from stdin. We can't use the new buffered reader here
-        // because we need to hand back owned memory. Read byte-by-byte into ArrayList.
         var line: std.ArrayList(u8) = .empty;
         errdefer line.deinit(allocator);
 
-        const stdin = std.fs.File.stdin();
+        const stdin = self.stdin_file;
         while (true) {
             var byte: [1]u8 = undefined;
             const n = stdin.read(&byte) catch |err| switch (err) {

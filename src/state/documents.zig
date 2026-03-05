@@ -1,5 +1,6 @@
 const std = @import("std");
 const LspClient = @import("../lsp/client.zig").LspClient;
+const lsp_types = @import("../lsp/types.zig");
 const uri_util = @import("../types/uri.zig");
 
 /// Tracks which documents are open in the LSP session.
@@ -12,7 +13,6 @@ pub const DocumentState = struct {
 
     const DocInfo = struct {
         version: i64,
-        uri: []const u8,
     };
 
     pub fn init(allocator: std.mem.Allocator, workspace_path: []const u8) DocumentState {
@@ -64,16 +64,7 @@ pub const DocumentState = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
 
-        const DidOpenParams = struct {
-            textDocument: struct {
-                uri: []const u8,
-                languageId: []const u8,
-                version: i64,
-                text: []const u8,
-            },
-        };
-
-        try lsp_client.sendNotification(arena.allocator(), "textDocument/didOpen", DidOpenParams{
+        try lsp_client.sendNotification(arena.allocator(), "textDocument/didOpen", lsp_types.DidOpenTextDocumentParams{
             .textDocument = .{
                 .uri = file_uri,
                 .languageId = "zig",
@@ -86,7 +77,6 @@ pub const DocumentState = struct {
         const stored_uri = try self.allocator.dupe(u8, file_uri);
         try self.open_docs.put(self.allocator, stored_uri, .{
             .version = 1,
-            .uri = stored_uri,
         });
 
         return try ret_allocator.dupe(u8, file_uri);
@@ -101,10 +91,7 @@ pub const DocumentState = struct {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
 
-            const CloseParams = struct {
-                textDocument: struct { uri: []const u8 },
-            };
-            lsp_client.sendNotification(arena.allocator(), "textDocument/didClose", CloseParams{
+            lsp_client.sendNotification(arena.allocator(), "textDocument/didClose", lsp_types.DidCloseTextDocumentParams{
                 .textDocument = .{ .uri = file_uri },
             }) catch |err| {
                 std.debug.print("[zig-mcp/docs] didClose notification failed: {}\n", .{err});
@@ -121,13 +108,8 @@ pub const DocumentState = struct {
 
         var it = self.open_docs.iterator();
         while (it.next()) |entry| {
-            const uri = entry.value_ptr.uri;
-
-            // Convert URI back to path for re-reading
-            const path = if (std.mem.startsWith(u8, uri, "file://"))
-                uri[7..]
-            else
-                uri;
+            const uri = entry.key_ptr.*;
+            const path = uri_util.stripFilePrefix(uri);
 
             const content = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch {
                 std.debug.print("[zig-mcp/docs] Failed to re-read {s} for reopen\n", .{path});
@@ -138,16 +120,7 @@ pub const DocumentState = struct {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
 
-            const DidOpenParams = struct {
-                textDocument: struct {
-                    uri: []const u8,
-                    languageId: []const u8,
-                    version: i64,
-                    text: []const u8,
-                },
-            };
-
-            lsp_client.sendNotification(arena.allocator(), "textDocument/didOpen", DidOpenParams{
+            lsp_client.sendNotification(arena.allocator(), "textDocument/didOpen", lsp_types.DidOpenTextDocumentParams{
                 .textDocument = .{
                     .uri = uri,
                     .languageId = "zig",

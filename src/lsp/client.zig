@@ -54,60 +54,10 @@ pub const LspClient = struct {
     /// Send an LSP request and block until the response arrives.
     /// Returns owned response JSON body, or error on timeout/failure.
     pub fn sendRequest(self: *LspClient, allocator: std.mem.Allocator, method: []const u8, params: anytype) ![]const u8 {
-        const stdin = self.zls_stdin orelse return error.NotConnected;
         const id = self.next_id.fetchAdd(1, .monotonic);
-
-        // Create pending request
-        const pending = try self.allocator.create(PendingRequest);
-        pending.* = .{ .allocator = self.allocator };
-
-        {
-            self.pending_mutex.lock();
-            defer self.pending_mutex.unlock();
-            try self.pending.put(self.allocator, id, pending);
-        }
-
-        errdefer {
-            self.pending_mutex.lock();
-            defer self.pending_mutex.unlock();
-            _ = self.pending.remove(id);
-            self.allocator.destroy(pending);
-        }
-
-        // Write LSP request
         const msg = try json_rpc.writeRequest(allocator, .{ .integer = id }, method, params);
         defer allocator.free(msg);
-        try LspTransport.writeMessage(stdin, msg);
-
-        // Wait for response (30s timeout)
-        pending.event.timedWait(30 * std.time.ns_per_s) catch {
-            self.pending_mutex.lock();
-            defer self.pending_mutex.unlock();
-            _ = self.pending.remove(id);
-            self.allocator.destroy(pending);
-            return error.RequestTimeout;
-        };
-
-        // Get response
-        const response = pending.response orelse {
-            self.pending_mutex.lock();
-            defer self.pending_mutex.unlock();
-            _ = self.pending.remove(id);
-            self.allocator.destroy(pending);
-            return error.NoResponse;
-        };
-
-        // Cleanup
-        {
-            self.pending_mutex.lock();
-            defer self.pending_mutex.unlock();
-            _ = self.pending.remove(id);
-        }
-        self.allocator.destroy(pending);
-
-        // Dupe to caller's allocator (free original on success or OOM)
-        defer self.allocator.free(response);
-        return try allocator.dupe(u8, response);
+        return self.sendRawRequest(allocator, id, msg);
     }
 
     /// Send an LSP notification (no response expected).
@@ -133,16 +83,14 @@ pub const LspClient = struct {
 
     /// Send LSP initialize request and initialized notification.
     pub fn initialize(self: *LspClient, allocator: std.mem.Allocator, workspace_uri: []const u8) ![]const u8 {
-        // Build init params as JSON manually for full control
+        const id = self.next_id.fetchAdd(1, .monotonic);
 
-        // Build init params as json.Value manually for more control
-        const init_json =
-            \\{"processId":null,"rootUri":"
-        ;
+        // Build the full request with raw JSON params for precise control
         var aw: std.Io.Writer.Allocating = .init(allocator);
         defer aw.deinit();
-        try aw.writer.writeAll(init_json);
-        // Escape the URI
+        try aw.writer.print(
+            \\{{"jsonrpc":"2.0","id":{d},"method":"initialize","params":{{"processId":null,"rootUri":"
+        , .{id});
         for (workspace_uri) |c| {
             switch (c) {
                 '"' => try aw.writer.writeAll("\\\""),
@@ -151,13 +99,23 @@ pub const LspClient = struct {
             }
         }
         try aw.writer.writeAll(
-            \\","capabilities":{"textDocument":{"hover":{"contentFormat":["markdown","plaintext"]},"completion":{"completionItem":{"snippetSupport":false}},"signatureHelp":{"signatureInformation":{"documentationFormat":["markdown","plaintext"]}},"publishDiagnostics":{"relatedInformation":true}}}}
+            \\","capabilities":{"textDocument":{"hover":{"contentFormat":["markdown","plaintext"]},"completion":{"completionItem":{"snippetSupport":false}},"signatureHelp":{"signatureInformation":{"documentationFormat":["markdown","plaintext"]}},"publishDiagnostics":{"relatedInformation":true}}}}}}
         );
-        const init_params_json = try aw.toOwnedSlice();
-        defer allocator.free(init_params_json);
+        const msg = try aw.toOwnedSlice();
+        defer allocator.free(msg);
 
-        // Build the full request manually
-        const id = self.next_id.fetchAdd(1, .monotonic);
+        const response = try self.sendRawRequest(allocator, id, msg);
+
+        // Send initialized notification (must send empty object {}, not [])
+        try self.sendRawNotification(allocator, "initialized");
+
+        return response;
+    }
+
+    /// Send a pre-serialized LSP request message and wait for the response.
+    fn sendRawRequest(self: *LspClient, allocator: std.mem.Allocator, id: i64, msg: []const u8) ![]const u8 {
+        const stdin = self.zls_stdin orelse return error.NotConnected;
+
         const pending = try self.allocator.create(PendingRequest);
         pending.* = .{ .allocator = self.allocator };
 
@@ -167,21 +125,16 @@ pub const LspClient = struct {
             try self.pending.put(self.allocator, id, pending);
         }
 
-        // Write raw LSP request
-        var req_aw: std.Io.Writer.Allocating = .init(allocator);
-        defer req_aw.deinit();
-        try req_aw.writer.print(
-            \\{{"jsonrpc":"2.0","id":{d},"method":"initialize","params":
-        , .{id});
-        try req_aw.writer.writeAll(init_params_json);
-        try req_aw.writer.writeByte('}');
-        const req_json = try req_aw.toOwnedSlice();
-        defer allocator.free(req_json);
+        errdefer {
+            self.pending_mutex.lock();
+            defer self.pending_mutex.unlock();
+            _ = self.pending.remove(id);
+            self.allocator.destroy(pending);
+        }
 
-        const stdin = self.zls_stdin orelse return error.NotConnected;
-        try LspTransport.writeMessage(stdin, req_json);
+        try LspTransport.writeMessage(stdin, msg);
 
-        // Wait for response
+        // Wait for response (30s timeout)
         pending.event.timedWait(30 * std.time.ns_per_s) catch {
             self.pending_mutex.lock();
             defer self.pending_mutex.unlock();
@@ -205,14 +158,8 @@ pub const LspClient = struct {
         }
         self.allocator.destroy(pending);
 
-        // Dupe response to caller allocator (free original on success or OOM)
         defer self.allocator.free(response);
-        const duped = try allocator.dupe(u8, response);
-
-        // Send initialized notification (must send empty object {}, not [])
-        try self.sendRawNotification(allocator, "initialized");
-
-        return duped;
+        return try allocator.dupe(u8, response);
     }
 
     /// Background thread: reads LSP messages from ZLS stdout, dispatches responses.

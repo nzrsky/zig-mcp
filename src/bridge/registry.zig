@@ -46,8 +46,8 @@ pub const Registry = struct {
         };
     }
 
-    pub fn register(self: *Registry, name: []const u8, handler: ToolHandler, definition: mcp_types.Tool) !void {
-        try self.entries.put(self.allocator, name, .{
+    pub fn register(self: *Registry, handler: ToolHandler, definition: mcp_types.Tool) !void {
+        try self.entries.put(self.allocator, definition.name, .{
             .handler = handler,
             .definition = definition,
         });
@@ -91,7 +91,7 @@ test "Registry register and lookup" {
     var reg = Registry.init(alloc);
     defer reg.deinit();
 
-    try reg.register("my_tool", dummyHandler, .{
+    try reg.register(dummyHandler, .{
         .name = "my_tool",
         .description = "A test tool",
         .inputSchema = .{},
@@ -115,12 +115,12 @@ test "Registry register multiple tools" {
     var reg = Registry.init(alloc);
     defer reg.deinit();
 
-    try reg.register("tool_a", dummyHandler, .{
+    try reg.register(dummyHandler, .{
         .name = "tool_a",
         .description = "Tool A",
         .inputSchema = .{},
     });
-    try reg.register("tool_b", otherHandler, .{
+    try reg.register(otherHandler, .{
         .name = "tool_b",
         .description = "Tool B",
         .inputSchema = .{},
@@ -135,12 +135,12 @@ test "Registry listTools returns all definitions" {
     var reg = Registry.init(alloc);
     defer reg.deinit();
 
-    try reg.register("alpha", dummyHandler, .{
+    try reg.register(dummyHandler, .{
         .name = "alpha",
         .description = "Alpha tool",
         .inputSchema = .{},
     });
-    try reg.register("beta", dummyHandler, .{
+    try reg.register(dummyHandler, .{
         .name = "beta",
         .description = "Beta tool",
         .inputSchema = .{},

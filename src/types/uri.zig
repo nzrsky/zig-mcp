@@ -83,6 +83,11 @@ pub fn resolvePath(allocator: std.mem.Allocator, workspace: []const u8, relative
     return std.fs.path.join(allocator, &.{ workspace, relative });
 }
 
+/// Strip `file://` prefix from a URI for display. Does not percent-decode.
+pub fn stripFilePrefix(uri: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, uri, "file://")) uri[7..] else uri;
+}
+
 fn needsEncoding(c: u8) bool {
     return switch (c) {
         'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~', '/', ':' => false,
