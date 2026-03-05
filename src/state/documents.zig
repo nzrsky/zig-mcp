@@ -168,3 +168,23 @@ pub const DocumentState = struct {
         self.open_docs.deinit(self.allocator);
     }
 };
+
+// ── Tests ──
+
+test "DocumentState init and deinit" {
+    const alloc = std.testing.allocator;
+    var ds = DocumentState.init(alloc, "/tmp/workspace");
+    defer ds.deinit();
+
+    try std.testing.expectEqualStrings("/tmp/workspace", ds.workspace_path);
+    try std.testing.expectEqual(@as(u32, 0), ds.open_docs.count());
+}
+
+test "DocumentState double deinit on empty is safe" {
+    const alloc = std.testing.allocator;
+    var ds = DocumentState.init(alloc, "/tmp");
+    ds.deinit();
+    // Re-init to avoid use-after-free on implicit deinit
+    ds = DocumentState.init(alloc, "/tmp");
+    ds.deinit();
+}

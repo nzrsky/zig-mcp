@@ -55,3 +55,52 @@ pub const McpTransport = struct {
         try self.stdout_file.writeAll("\n");
     }
 };
+
+// ── Tests ──
+
+fn readPipeAll(file: std.fs.File, buf: []u8) ![]const u8 {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = try file.read(buf[total..]);
+        if (n == 0) break;
+        total += n;
+    }
+    return buf[0..total];
+}
+
+test "writeMessage appends newline" {
+    const fds = try std.posix.pipe();
+    const read_end: std.fs.File = .{ .handle = fds[0] };
+    defer read_end.close();
+
+    var transport = McpTransport{
+        .stdin_file = read_end,
+        .stdout_file = .{ .handle = fds[1] },
+    };
+
+    try transport.writeMessage("{\"test\":1}");
+    transport.stdout_file.close();
+
+    var buf: [64]u8 = undefined;
+    const data = try readPipeAll(read_end, &buf);
+    try std.testing.expectEqualStrings("{\"test\":1}\n", data);
+}
+
+test "writeMessage multiple messages are newline-delimited" {
+    const fds = try std.posix.pipe();
+    const read_end: std.fs.File = .{ .handle = fds[0] };
+    defer read_end.close();
+
+    var transport = McpTransport{
+        .stdin_file = read_end,
+        .stdout_file = .{ .handle = fds[1] },
+    };
+
+    try transport.writeMessage("first");
+    try transport.writeMessage("second");
+    transport.stdout_file.close();
+
+    var buf: [64]u8 = undefined;
+    const data = try readPipeAll(read_end, &buf);
+    try std.testing.expectEqualStrings("first\nsecond\n", data);
+}

@@ -331,3 +331,50 @@ pub const LspClient = struct {
         std.debug.print("[zig-mcp/lsp] " ++ fmt ++ "\n", args);
     }
 };
+
+// ── Tests ──
+
+test "LspClient init creates disconnected client" {
+    const alloc = std.testing.allocator;
+    var client = LspClient.init(alloc);
+    defer client.deinit();
+
+    try std.testing.expect(client.zls_stdin == null);
+    try std.testing.expect(client.zls_stdout == null);
+    try std.testing.expect(client.reader_thread == null);
+    try std.testing.expect(client.running.load(.acquire) == false);
+}
+
+test "sendRequest returns NotConnected when disconnected" {
+    const alloc = std.testing.allocator;
+    var client = LspClient.init(alloc);
+    defer client.deinit();
+
+    try std.testing.expectError(error.NotConnected, client.sendRequest(alloc, "textDocument/hover", .{}));
+}
+
+test "sendNotification returns NotConnected when disconnected" {
+    const alloc = std.testing.allocator;
+    var client = LspClient.init(alloc);
+    defer client.deinit();
+
+    try std.testing.expectError(error.NotConnected, client.sendNotification(alloc, "textDocument/didOpen", .{}));
+}
+
+test "sendRawNotification returns NotConnected when disconnected" {
+    const alloc = std.testing.allocator;
+    var client = LspClient.init(alloc);
+    defer client.deinit();
+
+    try std.testing.expectError(error.NotConnected, client.sendRawNotification(alloc, "initialized"));
+}
+
+test "disconnect on already disconnected client is safe" {
+    const alloc = std.testing.allocator;
+    var client = LspClient.init(alloc);
+    defer client.deinit();
+
+    // Should not crash
+    client.disconnect();
+    client.disconnect();
+}
