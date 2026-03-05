@@ -9,11 +9,11 @@ const ToolError = registry.ToolError;
 
 /// Register all tools into the registry.
 pub fn registerAll(reg: *registry.Registry) !void {
-    try reg.register("zig_hover", handleHover, .{
+    try reg.register(handleHover, .{
         .name = "zig_hover",
         .description = "Get hover information (type info, documentation) for a symbol at a given position in a Zig file",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file (relative to workspace or absolute)" },
                 .{ "line", "integer", "0-based line number" },
                 .{ "character", "integer", "0-based character offset" },
@@ -22,11 +22,11 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register("zig_definition", handleDefinition, .{
+    try reg.register(handleDefinition, .{
         .name = "zig_definition",
         .description = "Go to definition of a symbol at a given position in a Zig file",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
                 .{ "line", "integer", "0-based line number" },
                 .{ "character", "integer", "0-based character offset" },
@@ -35,11 +35,11 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register("zig_references", handleReferences, .{
+    try reg.register(handleReferences, .{
         .name = "zig_references",
         .description = "Find all references to a symbol at a given position",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
                 .{ "line", "integer", "0-based line number" },
                 .{ "character", "integer", "0-based character offset" },
@@ -48,11 +48,11 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register("zig_completion", handleCompletion, .{
+    try reg.register(handleCompletion, .{
         .name = "zig_completion",
         .description = "Get completion suggestions at a given position in a Zig file",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
                 .{ "line", "integer", "0-based line number" },
                 .{ "character", "integer", "0-based character offset" },
@@ -61,33 +61,33 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register("zig_diagnostics", handleDiagnostics, .{
+    try reg.register(handleDiagnostics, .{
         .name = "zig_diagnostics",
         .description = "Get diagnostics (errors, warnings) for a Zig file by opening it in ZLS",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
             }),
             .required = &.{"file"},
         },
     });
 
-    try reg.register("zig_format", handleFormat, .{
+    try reg.register(handleFormat, .{
         .name = "zig_format",
         .description = "Format a Zig source file using ZLS",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
             }),
             .required = &.{"file"},
         },
     });
 
-    try reg.register("zig_rename", handleRename, .{
+    try reg.register(handleRename, .{
         .name = "zig_rename",
         .description = "Rename a symbol at a given position across the workspace",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
                 .{ "line", "integer", "0-based line number" },
                 .{ "character", "integer", "0-based character offset" },
@@ -97,33 +97,33 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register("zig_document_symbols", handleDocumentSymbols, .{
+    try reg.register(handleDocumentSymbols, .{
         .name = "zig_document_symbols",
         .description = "List all symbols (functions, types, variables) defined in a Zig file",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
             }),
             .required = &.{"file"},
         },
     });
 
-    try reg.register("zig_workspace_symbols", handleWorkspaceSymbols, .{
+    try reg.register(handleWorkspaceSymbols, .{
         .name = "zig_workspace_symbols",
         .description = "Search for symbols across the workspace",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "query", "string", "Search query for symbol names" },
             }),
             .required = &.{"query"},
         },
     });
 
-    try reg.register("zig_code_action", handleCodeAction, .{
+    try reg.register(handleCodeAction, .{
         .name = "zig_code_action",
         .description = "Get available code actions (quick fixes, refactors) for a range in a Zig file",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
                 .{ "start_line", "integer", "0-based start line" },
                 .{ "start_char", "integer", "0-based start character" },
@@ -134,11 +134,11 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register("zig_signature_help", handleSignatureHelp, .{
+    try reg.register(handleSignatureHelp, .{
         .name = "zig_signature_help",
         .description = "Get function signature help at a given position",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
                 .{ "line", "integer", "0-based line number" },
                 .{ "character", "integer", "0-based character offset" },
@@ -147,39 +147,39 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register("zig_build", handleBuild, .{
+    try reg.register(handleBuild, .{
         .name = "zig_build",
         .description = "Run `zig build` in the workspace. Returns build output (errors, warnings).",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "args", "string", "Additional arguments to pass to zig build (space-separated)" },
             }),
         },
     });
 
-    try reg.register("zig_test", handleTest, .{
+    try reg.register(handleTest, .{
         .name = "zig_test",
         .description = "Run Zig tests. If file is specified, runs tests for that file. Otherwise runs `zig build test`.",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Optional: specific file to test" },
                 .{ "filter", "string", "Optional: test name filter" },
             }),
         },
     });
 
-    try reg.register("zig_check", handleCheck, .{
+    try reg.register(handleCheck, .{
         .name = "zig_check",
         .description = "Run `zig ast-check` on a Zig source file to check for syntax errors",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file to check" },
             }),
             .required = &.{"file"},
         },
     });
 
-    try reg.register("zig_version", handleVersion, .{
+    try reg.register(handleVersion, .{
         .name = "zig_version",
         .description = "Get Zig and ZLS version information",
         .inputSchema = .{
@@ -187,30 +187,17 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register("zig_manage", handleManage, .{
+    try reg.register(handleManage, .{
         .name = "zig_manage",
         .description = "Manage Zig versions using zvm (Zig Version Manager)",
         .inputSchema = .{
-            .properties = try makeProps(reg.allocator, &.{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "action", "string", "Action: 'list', 'install', or 'use'" },
                 .{ "version", "string", "Version string (required for install/use)" },
             }),
             .required = &.{"action"},
         },
     });
-}
-
-// ── Helper: build JSON schema properties ──
-
-fn makeProps(allocator: std.mem.Allocator, comptime fields: anytype) ToolError!std.json.Value {
-    var obj = std.json.ObjectMap.init(allocator);
-    inline for (fields) |field| {
-        var prop = std.json.ObjectMap.init(allocator);
-        prop.put("type", .{ .string = field[1] }) catch return ToolError.OutOfMemory;
-        prop.put("description", .{ .string = field[2] }) catch return ToolError.OutOfMemory;
-        obj.put(field[0], .{ .object = prop }) catch return ToolError.OutOfMemory;
-    }
-    return .{ .object = obj };
 }
 
 // ── Helper: extract arguments ──
@@ -304,7 +291,7 @@ fn handleReferences(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     }) catch |err| return lspToToolError(err);
     defer ctx.allocator.free(response);
 
-    return formatLocationsResponse(ctx.allocator, response) catch return ToolError.LspError;
+    return formatLocationResponse(ctx.allocator, response) catch return ToolError.LspError;
 }
 
 fn handleCompletion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
@@ -523,7 +510,7 @@ fn handleVersion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const zig_ver = runZigCommand(ctx.allocator, ctx.workspace.root_path, "version", null) catch "unknown";
     defer if (!std.mem.eql(u8, zig_ver, "unknown")) ctx.allocator.free(zig_ver);
 
-    const zls_ver = runCommand(ctx.allocator, &.{ "zls", "--version" }, ctx.workspace.root_path) catch "unknown";
+    const zls_ver = runCommandSlice(ctx.allocator, &.{ "zls", "--version" }, ctx.workspace.root_path) catch "unknown";
     defer if (!std.mem.eql(u8, zls_ver, "unknown")) ctx.allocator.free(zls_ver);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -539,14 +526,14 @@ fn handleManage(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const version = getStringArg(args, "version");
 
     if (std.mem.eql(u8, action, "list")) {
-        return runCommand(ctx.allocator, &.{ "zvm", "list" }, ctx.workspace.root_path) catch
+        return runCommandSlice(ctx.allocator, &.{ "zvm", "list" }, ctx.workspace.root_path) catch
             return ctx.allocator.dupe(u8, "zvm not found. Install from https://github.com/tristanisham/zvm") catch return ToolError.OutOfMemory;
     } else if (std.mem.eql(u8, action, "install")) {
         const ver = version orelse return ToolError.InvalidParams;
-        return runCommand(ctx.allocator, &.{ "zvm", "install", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
+        return runCommandSlice(ctx.allocator, &.{ "zvm", "install", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
     } else if (std.mem.eql(u8, action, "use")) {
         const ver = version orelse return ToolError.InvalidParams;
-        return runCommand(ctx.allocator, &.{ "zvm", "use", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
+        return runCommandSlice(ctx.allocator, &.{ "zvm", "use", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
     }
     return ToolError.InvalidParams;
 }
@@ -632,11 +619,7 @@ fn formatSingleLocation(w: *std.Io.Writer, loc: std.json.Value) !void {
         .string => |s| s,
         else => return,
     };
-    // Strip file:// prefix for readability
-    const path = if (std.mem.startsWith(u8, uri_str, "file://"))
-        uri_str[7..]
-    else
-        uri_str;
+    const path = uri_util.stripFilePrefix(uri_str);
 
     if (loc_obj.get("range")) |range| {
         if (range == .object) {
@@ -657,11 +640,6 @@ fn formatSingleLocation(w: *std.Io.Writer, loc: std.json.Value) !void {
         }
     }
     try w.print("{s}", .{path});
-}
-
-fn formatLocationsResponse(allocator: std.mem.Allocator, response: []const u8) ![]const u8 {
-    // Same as location but expects an array
-    return formatLocationResponse(allocator, response);
 }
 
 fn formatCompletionResponse(allocator: std.mem.Allocator, response: []const u8) ![]const u8 {
@@ -789,10 +767,7 @@ fn formatWorkspaceEditResponse(allocator: std.mem.Allocator, response: []const u
             try aw.writer.print("Rename affects {d} file(s):\n", .{changes.object.count()});
             var it = changes.object.iterator();
             while (it.next()) |entry| {
-                const path = if (std.mem.startsWith(u8, entry.key_ptr.*, "file://"))
-                    entry.key_ptr.*[7..]
-                else
-                    entry.key_ptr.*;
+                const path = uri_util.stripFilePrefix(entry.key_ptr.*);
                 const edit_count: usize = switch (entry.value_ptr.*) {
                     .array => |a| a.items.len,
                     else => 0,
@@ -922,10 +897,7 @@ fn formatWorkspaceSymbolsResponse(allocator: std.mem.Allocator, response: []cons
             if (loc == .object) {
                 if (loc.object.get("uri")) |loc_uri| {
                     if (loc_uri == .string) {
-                        const path = if (std.mem.startsWith(u8, loc_uri.string, "file://"))
-                            loc_uri.string[7..]
-                        else
-                            loc_uri.string;
+                        const path = uri_util.stripFilePrefix(loc_uri.string);
                         try aw.writer.print(" in {s}", .{path});
                     }
                 }
@@ -1051,10 +1023,6 @@ fn runZigCommandArgs(allocator: std.mem.Allocator, cwd: []const u8, args: []cons
         try arg_list.append(allocator, arg);
     }
     return runCommandSlice(allocator, arg_list.items, cwd);
-}
-
-fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, cwd: []const u8) ![]const u8 {
-    return runCommandSlice(allocator, argv, cwd);
 }
 
 fn runCommandSlice(allocator: std.mem.Allocator, argv: []const []const u8, cwd: []const u8) ![]const u8 {
@@ -1283,21 +1251,3 @@ test "formatWorkspaceEditResponse with changes" {
     try std.testing.expect(std.mem.indexOf(u8, result, "/src/main.zig") != null);
 }
 
-test "makeProps builds valid JSON schema properties" {
-    const alloc = std.testing.allocator;
-    const props = try makeProps(alloc, &.{
-        .{ "file", "string", "Path to file" },
-        .{ "line", "integer", "Line number" },
-    });
-    defer {
-        var obj = props.object;
-        var it = obj.iterator();
-        while (it.next()) |entry| {
-            var inner = entry.value_ptr.object;
-            inner.deinit();
-        }
-        obj.deinit();
-    }
-    try std.testing.expectEqualStrings("string", props.object.get("file").?.object.get("type").?.string);
-    try std.testing.expectEqualStrings("integer", props.object.get("line").?.object.get("type").?.string);
-}
