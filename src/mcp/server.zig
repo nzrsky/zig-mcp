@@ -371,3 +371,258 @@ pub const McpServer = struct {
         try self.transport.writeMessage(resp);
     }
 };
+
+// ── Tests ──
+
+const TestSetup = struct {
+    server: *McpServer,
+    transport: *McpTransport,
+    registry: *Registry,
+    lsp_client: *LspClient,
+    doc_state: *DocumentState,
+    workspace: *Workspace,
+    read_end: std.fs.File,
+    write_end_closed: bool,
+    alloc: std.mem.Allocator,
+
+    fn init(alloc: std.mem.Allocator) !TestSetup {
+        const fds = try std.posix.pipe();
+
+        const transport = try alloc.create(McpTransport);
+        transport.* = .{
+            .stdin_file = .{ .handle = fds[0] },
+            .stdout_file = .{ .handle = fds[1] },
+        };
+
+        const registry = try alloc.create(Registry);
+        registry.* = Registry.init(alloc);
+
+        const lsp_client = try alloc.create(LspClient);
+        lsp_client.* = LspClient.init(alloc);
+
+        const workspace = try alloc.create(Workspace);
+        workspace.* = try Workspace.init(alloc, "/tmp");
+
+        const doc_state = try alloc.create(DocumentState);
+        doc_state.* = DocumentState.init(alloc, "/tmp");
+
+        const server = try alloc.create(McpServer);
+        server.* = McpServer.init(alloc, transport, registry, lsp_client, doc_state, workspace);
+
+        return .{
+            .server = server,
+            .transport = transport,
+            .registry = registry,
+            .lsp_client = lsp_client,
+            .doc_state = doc_state,
+            .workspace = workspace,
+            .read_end = .{ .handle = fds[0] },
+            .write_end_closed = false,
+            .alloc = alloc,
+        };
+    }
+
+    /// Close write end and read all response data from pipe.
+    fn getResponse(self: *TestSetup) ![]const u8 {
+        if (!self.write_end_closed) {
+            self.transport.stdout_file.close();
+            self.write_end_closed = true;
+        }
+        var buf: [8192]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            const n = try self.read_end.read(buf[total..]);
+            if (n == 0) break;
+            total += n;
+        }
+        return try self.alloc.dupe(u8, std.mem.trimRight(u8, buf[0..total], "\n"));
+    }
+
+    fn deinit(self: *TestSetup) void {
+        if (!self.write_end_closed) self.transport.stdout_file.close();
+        self.read_end.close();
+        self.doc_state.deinit();
+        self.alloc.destroy(self.doc_state);
+        self.workspace.deinit();
+        self.alloc.destroy(self.workspace);
+        self.lsp_client.deinit();
+        self.alloc.destroy(self.lsp_client);
+        self.registry.deinit();
+        self.alloc.destroy(self.registry);
+        self.alloc.destroy(self.transport);
+        self.alloc.destroy(self.server);
+    }
+};
+
+test "handleMessage initialize" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    defer ctx.deinit();
+
+    try ctx.server.handleMessage(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+    );
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("2024-11-05", result.get("protocolVersion").?.string);
+    const info = result.get("serverInfo").?.object;
+    try std.testing.expectEqualStrings("zig-mcp", info.get("name").?.string);
+    try std.testing.expectEqual(State.running, ctx.server.state);
+}
+
+test "handleMessage ping" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    defer ctx.deinit();
+
+    try ctx.server.handleMessage(alloc,
+        \\{"jsonrpc":"2.0","id":42,"method":"ping"}
+    );
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("2.0", parsed.value.object.get("jsonrpc").?.string);
+    try std.testing.expect(parsed.value.object.get("result") != null);
+}
+
+test "handleMessage shutdown" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    defer ctx.deinit();
+
+    try ctx.server.handleMessage(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"shutdown"}
+    );
+
+    try std.testing.expectEqual(State.shutdown, ctx.server.state);
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("result") != null);
+}
+
+test "notifications/initialized sets state to running" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    defer ctx.deinit();
+
+    try ctx.server.handleMessage(alloc,
+        \\{"jsonrpc":"2.0","method":"notifications/initialized"}
+    );
+
+    try std.testing.expectEqual(State.running, ctx.server.state);
+}
+
+test "handleMessage unknown method returns method_not_found" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    defer ctx.deinit();
+
+    try ctx.server.handleMessage(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"nonexistent/method"}
+    );
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    const err = parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, -32601), err.get("code").?.integer);
+}
+
+test "handleMessage invalid JSON returns parse_error" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    defer ctx.deinit();
+
+    try ctx.server.handleMessage(alloc, "not valid json{{{");
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    const err = parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, -32700), err.get("code").?.integer);
+}
+
+test "handleMessage non-object JSON returns invalid_request" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    defer ctx.deinit();
+
+    try ctx.server.handleMessage(alloc, "[1,2,3]");
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    const err = parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, -32600), err.get("code").?.integer);
+}
+
+test "handleMessage missing method returns invalid_request" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    defer ctx.deinit();
+
+    try ctx.server.handleMessage(alloc,
+        \\{"jsonrpc":"2.0","id":1}
+    );
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    const err = parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, -32600), err.get("code").?.integer);
+}
+
+test "handleMessage tools/call unknown tool" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    defer ctx.deinit();
+
+    try ctx.server.handleMessage(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nonexistent"}}
+    );
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    const err = parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, -32601), err.get("code").?.integer);
+}
+
+test "handleMessage tools/call invalid params" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    defer ctx.deinit();
+
+    try ctx.server.handleMessage(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"not_object"}
+    );
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+
+    const err = parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, -32602), err.get("code").?.integer);
+}

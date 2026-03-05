@@ -126,3 +126,122 @@ pub const LspTransport = struct {
         return reader.readMessage(allocator);
     }
 };
+
+// ── Tests ──
+
+fn testPipe() !struct { read_end: std.fs.File, write_end: std.fs.File } {
+    const fds = try std.posix.pipe();
+    return .{
+        .read_end = .{ .handle = fds[0] },
+        .write_end = .{ .handle = fds[1] },
+    };
+}
+
+fn readPipeAll(file: std.fs.File, buf: []u8) ![]const u8 {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = try file.read(buf[total..]);
+        if (n == 0) break;
+        total += n;
+    }
+    return buf[0..total];
+}
+
+test "writeMessage adds Content-Length framing" {
+    const p = try testPipe();
+    defer p.read_end.close();
+
+    try LspTransport.writeMessage(p.write_end, "hello");
+    p.write_end.close();
+
+    var buf: [64]u8 = undefined;
+    const data = try readPipeAll(p.read_end, &buf);
+    try std.testing.expectEqualStrings("Content-Length: 5\r\n\r\nhello", data);
+}
+
+test "writeMessage empty body" {
+    const p = try testPipe();
+    defer p.read_end.close();
+
+    try LspTransport.writeMessage(p.write_end, "");
+    p.write_end.close();
+
+    var buf: [64]u8 = undefined;
+    const data = try readPipeAll(p.read_end, &buf);
+    try std.testing.expectEqualStrings("Content-Length: 0\r\n\r\n", data);
+}
+
+test "Reader parses single message" {
+    const alloc = std.testing.allocator;
+    const p = try testPipe();
+    defer p.read_end.close();
+
+    try LspTransport.writeMessage(p.write_end, "{\"ok\":true}");
+    p.write_end.close();
+
+    var reader = LspTransport.Reader.init(p.read_end);
+    const msg = (try reader.readMessage(alloc)).?;
+    defer alloc.free(msg);
+    try std.testing.expectEqualStrings("{\"ok\":true}", msg);
+}
+
+test "Reader parses multiple sequential messages" {
+    const alloc = std.testing.allocator;
+    const p = try testPipe();
+    defer p.read_end.close();
+
+    try LspTransport.writeMessage(p.write_end, "msg1");
+    try LspTransport.writeMessage(p.write_end, "msg2");
+    try LspTransport.writeMessage(p.write_end, "msg3");
+    p.write_end.close();
+
+    var reader = LspTransport.Reader.init(p.read_end);
+
+    const m1 = (try reader.readMessage(alloc)).?;
+    defer alloc.free(m1);
+    try std.testing.expectEqualStrings("msg1", m1);
+
+    const m2 = (try reader.readMessage(alloc)).?;
+    defer alloc.free(m2);
+    try std.testing.expectEqualStrings("msg2", m2);
+
+    const m3 = (try reader.readMessage(alloc)).?;
+    defer alloc.free(m3);
+    try std.testing.expectEqualStrings("msg3", m3);
+
+    try std.testing.expect(try reader.readMessage(alloc) == null);
+}
+
+test "Reader returns null on empty pipe" {
+    const alloc = std.testing.allocator;
+    const p = try testPipe();
+    defer p.read_end.close();
+    p.write_end.close();
+
+    var reader = LspTransport.Reader.init(p.read_end);
+    try std.testing.expect(try reader.readMessage(alloc) == null);
+}
+
+test "Reader returns error on missing Content-Length" {
+    const alloc = std.testing.allocator;
+    const p = try testPipe();
+    defer p.read_end.close();
+
+    try p.write_end.writeAll("Bad-Header: 5\r\n\r\nhello");
+    p.write_end.close();
+
+    var reader = LspTransport.Reader.init(p.read_end);
+    try std.testing.expectError(error.MissingContentLength, reader.readMessage(alloc));
+}
+
+test "Reader returns error on zero Content-Length" {
+    const alloc = std.testing.allocator;
+    const p = try testPipe();
+    defer p.read_end.close();
+
+    try p.write_end.writeAll("Content-Length: 0\r\n\r\n");
+    p.write_end.close();
+
+    var reader = LspTransport.Reader.init(p.read_end);
+    try std.testing.expectError(error.MissingContentLength, reader.readMessage(alloc));
+}
