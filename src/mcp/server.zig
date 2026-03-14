@@ -26,10 +26,12 @@ pub const McpServer = struct {
     doc_state: *DocumentState,
     workspace: *const Workspace,
     allocator: std.mem.Allocator,
+    io: std.Io,
     zls_process: ?*ZlsProcess = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         transport: *McpTransport,
         reg: *Registry,
         lsp_client: *LspClient,
@@ -43,6 +45,7 @@ pub const McpServer = struct {
             .doc_state = doc_state,
             .workspace = workspace,
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -250,6 +253,7 @@ pub const McpServer = struct {
             .doc_state = self.doc_state,
             .workspace = self.workspace,
             .allocator = allocator,
+            .io = self.io,
         };
 
         const result_text = handler(ctx, tool_args) catch |err| {
@@ -374,6 +378,8 @@ pub const McpServer = struct {
 
 // ── Tests ──
 
+const compat = @import("../compat.zig");
+
 const TestSetup = struct {
     server: *McpServer,
     transport: *McpTransport,
@@ -381,17 +387,17 @@ const TestSetup = struct {
     lsp_client: *LspClient,
     doc_state: *DocumentState,
     workspace: *Workspace,
-    read_end: std.fs.File,
+    read_end: compat.File,
     write_end_closed: bool,
     alloc: std.mem.Allocator,
 
     fn init(alloc: std.mem.Allocator) !TestSetup {
-        const fds = try std.posix.pipe();
+        const p = try compat.pipe();
 
         const transport = try alloc.create(McpTransport);
         transport.* = .{
-            .stdin_file = .{ .handle = fds[0] },
-            .stdout_file = .{ .handle = fds[1] },
+            .stdin_file = p.read_end,
+            .stdout_file = p.write_end,
         };
 
         const registry = try alloc.create(Registry);
@@ -407,7 +413,7 @@ const TestSetup = struct {
         doc_state.* = DocumentState.init(alloc, "/tmp");
 
         const server = try alloc.create(McpServer);
-        server.* = McpServer.init(alloc, transport, registry, lsp_client, doc_state, workspace);
+        server.* = McpServer.init(alloc, std.testing.io, transport, registry, lsp_client, doc_state, workspace);
 
         return .{
             .server = server,
@@ -416,7 +422,7 @@ const TestSetup = struct {
             .lsp_client = lsp_client,
             .doc_state = doc_state,
             .workspace = workspace,
-            .read_end = .{ .handle = fds[0] },
+            .read_end = p.read_end,
             .write_end_closed = false,
             .alloc = alloc,
         };
@@ -435,7 +441,7 @@ const TestSetup = struct {
             if (n == 0) break;
             total += n;
         }
-        return try self.alloc.dupe(u8, std.mem.trimRight(u8, buf[0..total], "\n"));
+        return try self.alloc.dupe(u8, std.mem.trimEnd(u8, buf[0..total], "\n"));
     }
 
     fn deinit(self: *TestSetup) void {
