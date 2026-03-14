@@ -2,6 +2,7 @@ const std = @import("std");
 const LspClient = @import("../lsp/client.zig").LspClient;
 const lsp_types = @import("../lsp/types.zig");
 const uri_util = @import("../types/uri.zig");
+const compat = @import("../compat.zig");
 
 /// Tracks which documents are open in the LSP session.
 /// Sends didOpen/didClose notifications as needed.
@@ -9,7 +10,7 @@ pub const DocumentState = struct {
     open_docs: std.StringHashMapUnmanaged(DocInfo),
     allocator: std.mem.Allocator,
     workspace_path: []const u8,
-    mutex: std.Thread.Mutex = .{},
+    mutex: compat.Mutex = .{},
 
     const DocInfo = struct {
         version: i64,
@@ -43,7 +44,7 @@ pub const DocumentState = struct {
         }
 
         // Slow path: read file content outside the lock (no mutex held during I/O)
-        const content = std.fs.cwd().readFileAlloc(self.allocator, abs_path, 10 * 1024 * 1024) catch |err| {
+        const content = compat.readFileAlloc(self.allocator, abs_path, 10 * 1024 * 1024) catch |err| {
             return switch (err) {
                 error.FileNotFound => error.FileNotFound,
                 else => error.FileReadError,
@@ -111,7 +112,7 @@ pub const DocumentState = struct {
             const uri = entry.key_ptr.*;
             const path = uri_util.stripFilePrefix(uri);
 
-            const content = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch {
+            const content = compat.readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch {
                 std.debug.print("[zig-mcp/docs] Failed to re-read {s} for reopen\n", .{path});
                 continue;
             };

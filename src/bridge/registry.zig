@@ -11,6 +11,7 @@ pub const ToolContext = struct {
     doc_state: *DocumentState,
     workspace: *const Workspace,
     allocator: std.mem.Allocator,
+    io: std.Io,
 };
 
 /// A tool handler function.

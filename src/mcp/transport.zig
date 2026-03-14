@@ -1,17 +1,18 @@
 const std = @import("std");
 const json_rpc = @import("../types/json_rpc.zig");
+const compat = @import("../compat.zig");
 
 /// MCP transport: newline-delimited JSON-RPC over stdin/stdout.
 /// Each message is a single JSON object followed by '\n'.
 pub const McpTransport = struct {
-    stdin_file: std.fs.File,
-    stdout_file: std.fs.File,
-    stdout_mutex: std.Thread.Mutex = .{},
+    stdin_file: compat.File,
+    stdout_file: compat.File,
+    stdout_mutex: compat.Mutex = .{},
 
     pub fn init() McpTransport {
         return .{
-            .stdin_file = std.fs.File.stdin(),
-            .stdout_file = std.fs.File.stdout(),
+            .stdin_file = compat.File.stdin(),
+            .stdout_file = compat.File.stdout(),
         };
     }
 
@@ -25,7 +26,7 @@ pub const McpTransport = struct {
         while (true) {
             var byte: [1]u8 = undefined;
             const n = stdin.read(&byte) catch |err| switch (err) {
-                error.BrokenPipe => return null,
+                error.ConnectionResetByPeer => return null,
                 else => return err,
             };
             if (n == 0) {
@@ -55,7 +56,7 @@ pub const McpTransport = struct {
 
 // ── Tests ──
 
-fn readPipeAll(file: std.fs.File, buf: []u8) ![]const u8 {
+fn readPipeAll(file: compat.File, buf: []u8) ![]const u8 {
     var total: usize = 0;
     while (total < buf.len) {
         const n = try file.read(buf[total..]);
@@ -66,31 +67,29 @@ fn readPipeAll(file: std.fs.File, buf: []u8) ![]const u8 {
 }
 
 test "writeMessage appends newline" {
-    const fds = try std.posix.pipe();
-    const read_end: std.fs.File = .{ .handle = fds[0] };
-    defer read_end.close();
+    const p = try compat.pipe();
+    defer p.read_end.close();
 
     var transport = McpTransport{
-        .stdin_file = read_end,
-        .stdout_file = .{ .handle = fds[1] },
+        .stdin_file = p.read_end,
+        .stdout_file = p.write_end,
     };
 
     try transport.writeMessage("{\"test\":1}");
     transport.stdout_file.close();
 
     var buf: [64]u8 = undefined;
-    const data = try readPipeAll(read_end, &buf);
+    const data = try readPipeAll(p.read_end, &buf);
     try std.testing.expectEqualStrings("{\"test\":1}\n", data);
 }
 
 test "writeMessage multiple messages are newline-delimited" {
-    const fds = try std.posix.pipe();
-    const read_end: std.fs.File = .{ .handle = fds[0] };
-    defer read_end.close();
+    const p = try compat.pipe();
+    defer p.read_end.close();
 
     var transport = McpTransport{
-        .stdin_file = read_end,
-        .stdout_file = .{ .handle = fds[1] },
+        .stdin_file = p.read_end,
+        .stdout_file = p.write_end,
     };
 
     try transport.writeMessage("first");
@@ -98,6 +97,6 @@ test "writeMessage multiple messages are newline-delimited" {
     transport.stdout_file.close();
 
     var buf: [64]u8 = undefined;
-    const data = try readPipeAll(read_end, &buf);
+    const data = try readPipeAll(p.read_end, &buf);
     try std.testing.expectEqualStrings("first\nsecond\n", data);
 }

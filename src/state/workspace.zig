@@ -1,5 +1,6 @@
 const std = @import("std");
 const uri_util = @import("../types/uri.zig");
+const compat = @import("../compat.zig");
 
 /// Workspace state: tracks root path and provides URI conversion.
 pub const Workspace = struct {
@@ -12,8 +13,10 @@ pub const Workspace = struct {
         const abs_path = if (std.fs.path.isAbsolute(workspace_path))
             try allocator.dupe(u8, workspace_path)
         else blk: {
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
-            const cwd = try std.process.getCwd(&buf);
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const rc = std.os.linux.getcwd(&buf, buf.len);
+            if (std.posix.errno(rc) != .SUCCESS) return error.CurrentDirUnlinked;
+            const cwd = std.mem.sliceTo(&buf, 0);
             break :blk try std.fs.path.join(allocator, &.{ cwd, workspace_path });
         };
         errdefer allocator.free(abs_path);

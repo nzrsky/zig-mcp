@@ -1,11 +1,12 @@
 const std = @import("std");
 const LspTransport = @import("transport.zig").LspTransport;
 const json_rpc = @import("../types/json_rpc.zig");
+const compat = @import("../compat.zig");
 
 /// Pending request waiting for a response from ZLS.
 const PendingRequest = struct {
     response: ?[]const u8 = null,
-    event: std.Thread.ResetEvent = .{},
+    event: compat.Event = .{},
     allocator: std.mem.Allocator,
 };
 
@@ -15,18 +16,18 @@ const PendingRequest = struct {
 /// - Main thread calls sendRequest() which blocks until reader thread delivers the response.
 /// - Reader thread runs readerLoop() reading ZLS stdout and dispatching responses/notifications.
 pub const LspClient = struct {
-    zls_stdin: ?std.fs.File,
-    zls_stdout: ?std.fs.File,
+    zls_stdin: ?compat.File,
+    zls_stdout: ?compat.File,
     next_id: std.atomic.Value(i64) = std.atomic.Value(i64).init(1),
     pending: std.AutoHashMapUnmanaged(i64, *PendingRequest),
-    pending_mutex: std.Thread.Mutex = .{},
+    pending_mutex: compat.Mutex = .{},
     reader_thread: ?std.Thread = null,
     allocator: std.mem.Allocator,
     notification_callback: ?*const fn (method: []const u8, params: ?std.json.Value) void = null,
     diagnostics_callback: ?*const fn ([]const u8, []const u8) void = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     stderr_thread: ?std.Thread = null,
-    zls_stderr: ?std.fs.File = null,
+    zls_stderr: ?compat.File = null,
 
     pub fn init(allocator: std.mem.Allocator) LspClient {
         return .{
@@ -38,15 +39,15 @@ pub const LspClient = struct {
     }
 
     /// Connect to ZLS pipes and start reader thread.
-    pub fn connect(self: *LspClient, stdin: std.fs.File, stdout: std.fs.File, stderr: ?std.fs.File) !void {
-        self.zls_stdin = stdin;
-        self.zls_stdout = stdout;
-        self.zls_stderr = stderr;
+    pub fn connect(self: *LspClient, stdin_file: compat.File, stdout_file: compat.File, stderr_file: ?compat.File) !void {
+        self.zls_stdin = stdin_file;
+        self.zls_stdout = stdout_file;
+        self.zls_stderr = stderr_file;
         self.running.store(true, .release);
 
         self.reader_thread = try std.Thread.spawn(.{}, readerLoop, .{self});
 
-        if (stderr) |se| {
+        if (stderr_file) |se| {
             self.stderr_thread = try std.Thread.spawn(.{}, stderrLoop, .{se});
         }
     }
@@ -62,15 +63,15 @@ pub const LspClient = struct {
 
     /// Send an LSP notification (no response expected).
     pub fn sendNotification(self: *LspClient, allocator: std.mem.Allocator, method: []const u8, params: anytype) !void {
-        const stdin = self.zls_stdin orelse return error.NotConnected;
+        const stdin_file = self.zls_stdin orelse return error.NotConnected;
         const msg = try json_rpc.writeNotification(allocator, method, params);
         defer allocator.free(msg);
-        try LspTransport.writeMessage(stdin, msg);
+        try LspTransport.writeMessage(stdin_file, msg);
     }
 
     /// Send a notification with empty params object (avoids [] vs {} serialization issue).
     pub fn sendRawNotification(self: *LspClient, allocator: std.mem.Allocator, method: []const u8) !void {
-        const stdin = self.zls_stdin orelse return error.NotConnected;
+        const stdin_file = self.zls_stdin orelse return error.NotConnected;
         var aw: std.Io.Writer.Allocating = .init(allocator);
         defer aw.deinit();
         try aw.writer.print(
@@ -78,7 +79,7 @@ pub const LspClient = struct {
         , .{method});
         const msg = try aw.toOwnedSlice();
         defer allocator.free(msg);
-        try LspTransport.writeMessage(stdin, msg);
+        try LspTransport.writeMessage(stdin_file, msg);
     }
 
     /// Send LSP initialize request and initialized notification.
@@ -114,7 +115,7 @@ pub const LspClient = struct {
 
     /// Send a pre-serialized LSP request message and wait for the response.
     fn sendRawRequest(self: *LspClient, allocator: std.mem.Allocator, id: i64, msg: []const u8) ![]const u8 {
-        const stdin = self.zls_stdin orelse return error.NotConnected;
+        const stdin_file = self.zls_stdin orelse return error.NotConnected;
 
         const pending = try self.allocator.create(PendingRequest);
         pending.* = .{ .allocator = self.allocator };
@@ -132,7 +133,7 @@ pub const LspClient = struct {
             self.allocator.destroy(pending);
         }
 
-        try LspTransport.writeMessage(stdin, msg);
+        try LspTransport.writeMessage(stdin_file, msg);
 
         // Wait for response (30s timeout)
         pending.event.timedWait(30 * std.time.ns_per_s) catch {
@@ -164,8 +165,8 @@ pub const LspClient = struct {
 
     /// Background thread: reads LSP messages from ZLS stdout, dispatches responses.
     fn readerLoop(self: *LspClient) void {
-        const stdout = self.zls_stdout orelse return;
-        var reader = LspTransport.Reader.init(stdout);
+        const stdout_file = self.zls_stdout orelse return;
+        var reader = LspTransport.Reader.init(stdout_file);
 
         while (self.running.load(.acquire)) {
             const msg = reader.readMessage(self.allocator) catch |err| {
@@ -196,13 +197,13 @@ pub const LspClient = struct {
 
             if (obj.get("id")) |id_val| {
                 // Response — find pending request
-                const id: i64 = switch (id_val) {
+                const response_id: i64 = switch (id_val) {
                     .integer => |i| i,
                     else => continue,
                 };
 
                 self.pending_mutex.lock();
-                const maybe_pending = self.pending.get(id);
+                const maybe_pending = self.pending.get(response_id);
                 self.pending_mutex.unlock();
 
                 if (maybe_pending) |p| {
@@ -216,10 +217,10 @@ pub const LspClient = struct {
         }
     }
 
-    fn stderrLoop(stderr: std.fs.File) void {
+    fn stderrLoop(stderr_file: compat.File) void {
         var buf: [4096]u8 = undefined;
         while (true) {
-            const n = stderr.read(&buf) catch return;
+            const n = stderr_file.read(&buf) catch return;
             if (n == 0) return;
             log("ZLS stderr: {s}", .{buf[0..n]});
         }
@@ -238,16 +239,16 @@ pub const LspClient = struct {
     pub fn disconnect(self: *LspClient) void {
         self.running.store(false, .release);
         // Close all pipes to signal ZLS to exit and unblock reader threads
-        if (self.zls_stdin) |stdin| {
-            stdin.close();
+        if (self.zls_stdin) |f| {
+            f.close();
             self.zls_stdin = null;
         }
-        if (self.zls_stdout) |stdout| {
-            stdout.close();
+        if (self.zls_stdout) |f| {
+            f.close();
             self.zls_stdout = null;
         }
-        if (self.zls_stderr) |se| {
-            se.close();
+        if (self.zls_stderr) |f| {
+            f.close();
             self.zls_stderr = null;
         }
         // Now safe to join — readers will see EOF from closed pipes

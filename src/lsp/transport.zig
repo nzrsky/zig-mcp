@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 
 /// LSP transport: Content-Length framed JSON-RPC.
 /// Format: `Content-Length: N\r\n\r\n<N bytes of JSON>`
@@ -6,12 +7,12 @@ pub const LspTransport = struct {
     /// Buffered reader for LSP stdout. Persists between readMessage calls
     /// so that bytes read-ahead during header parsing aren't lost.
     pub const Reader = struct {
-        file: std.fs.File,
+        file: compat.File,
         buf: [8192]u8 = undefined,
         buf_start: usize = 0,
         buf_end: usize = 0,
 
-        pub fn init(file: std.fs.File) Reader {
+        pub fn init(file: compat.File) Reader {
             return .{ .file = file };
         }
 
@@ -19,7 +20,7 @@ pub const LspTransport = struct {
         fn readByte(self: *Reader) !?u8 {
             if (self.buf_start >= self.buf_end) {
                 const n = self.file.read(&self.buf) catch |err| switch (err) {
-                    error.BrokenPipe => return null,
+                    error.ConnectionResetByPeer => return null,
                     else => return err,
                 };
                 if (n == 0) return null;
@@ -45,7 +46,7 @@ pub const LspTransport = struct {
                 } else {
                     // Buffer empty — read directly into destination for large bodies
                     const n = self.file.read(dest[pos..]) catch |err| switch (err) {
-                        error.BrokenPipe => return false,
+                        error.ConnectionResetByPeer => return false,
                         else => return err,
                     };
                     if (n == 0) return false; // EOF
@@ -110,7 +111,7 @@ pub const LspTransport = struct {
 
     /// Write one LSP message to the given file (ZLS stdin pipe).
     /// Adds Content-Length header framing.
-    pub fn writeMessage(file: std.fs.File, data: []const u8) !void {
+    pub fn writeMessage(file: compat.File, data: []const u8) !void {
         var header_buf: [64]u8 = undefined;
         var header_w: std.Io.Writer = .fixed(&header_buf);
         try header_w.print("Content-Length: {d}\r\n\r\n", .{data.len});
@@ -121,7 +122,7 @@ pub const LspTransport = struct {
     }
 
     /// Legacy static readMessage for backward compat (no buffering).
-    pub fn readMessage(file: std.fs.File, allocator: std.mem.Allocator) !?[]const u8 {
+    pub fn readMessage(file: compat.File, allocator: std.mem.Allocator) !?[]const u8 {
         var reader = Reader.init(file);
         return reader.readMessage(allocator);
     }
@@ -129,15 +130,7 @@ pub const LspTransport = struct {
 
 // ── Tests ──
 
-fn testPipe() !struct { read_end: std.fs.File, write_end: std.fs.File } {
-    const fds = try std.posix.pipe();
-    return .{
-        .read_end = .{ .handle = fds[0] },
-        .write_end = .{ .handle = fds[1] },
-    };
-}
-
-fn readPipeAll(file: std.fs.File, buf: []u8) ![]const u8 {
+fn readPipeAll(file: compat.File, buf: []u8) ![]const u8 {
     var total: usize = 0;
     while (total < buf.len) {
         const n = try file.read(buf[total..]);
@@ -148,7 +141,7 @@ fn readPipeAll(file: std.fs.File, buf: []u8) ![]const u8 {
 }
 
 test "writeMessage adds Content-Length framing" {
-    const p = try testPipe();
+    const p = try compat.pipe();
     defer p.read_end.close();
 
     try LspTransport.writeMessage(p.write_end, "hello");
@@ -160,7 +153,7 @@ test "writeMessage adds Content-Length framing" {
 }
 
 test "writeMessage empty body" {
-    const p = try testPipe();
+    const p = try compat.pipe();
     defer p.read_end.close();
 
     try LspTransport.writeMessage(p.write_end, "");
@@ -173,7 +166,7 @@ test "writeMessage empty body" {
 
 test "Reader parses single message" {
     const alloc = std.testing.allocator;
-    const p = try testPipe();
+    const p = try compat.pipe();
     defer p.read_end.close();
 
     try LspTransport.writeMessage(p.write_end, "{\"ok\":true}");
@@ -187,7 +180,7 @@ test "Reader parses single message" {
 
 test "Reader parses multiple sequential messages" {
     const alloc = std.testing.allocator;
-    const p = try testPipe();
+    const p = try compat.pipe();
     defer p.read_end.close();
 
     try LspTransport.writeMessage(p.write_end, "msg1");
@@ -214,7 +207,7 @@ test "Reader parses multiple sequential messages" {
 
 test "Reader returns null on empty pipe" {
     const alloc = std.testing.allocator;
-    const p = try testPipe();
+    const p = try compat.pipe();
     defer p.read_end.close();
     p.write_end.close();
 
@@ -224,7 +217,7 @@ test "Reader returns null on empty pipe" {
 
 test "Reader returns error on missing Content-Length" {
     const alloc = std.testing.allocator;
-    const p = try testPipe();
+    const p = try compat.pipe();
     defer p.read_end.close();
 
     try p.write_end.writeAll("Bad-Header: 5\r\n\r\nhello");
@@ -236,7 +229,7 @@ test "Reader returns error on missing Content-Length" {
 
 test "Reader returns error on zero Content-Length" {
     const alloc = std.testing.allocator;
-    const p = try testPipe();
+    const p = try compat.pipe();
     defer p.read_end.close();
 
     try p.write_end.writeAll("Content-Length: 0\r\n\r\n");
