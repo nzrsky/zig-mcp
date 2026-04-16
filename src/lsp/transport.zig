@@ -6,20 +6,21 @@ pub const LspTransport = struct {
     /// Buffered reader for LSP stdout. Persists between readMessage calls
     /// so that bytes read-ahead during header parsing aren't lost.
     pub const Reader = struct {
-        file: std.fs.File,
+        file: std.Io.File,
+        io: std.Io,
         buf: [8192]u8 = undefined,
         buf_start: usize = 0,
         buf_end: usize = 0,
 
-        pub fn init(file: std.fs.File) Reader {
-            return .{ .file = file };
+        pub fn init(file: std.Io.File, io: std.Io) Reader {
+            return .{ .file = file, .io = io };
         }
 
         /// Read a single byte from the buffer (refills from file as needed).
         fn readByte(self: *Reader) !?u8 {
             if (self.buf_start >= self.buf_end) {
-                const n = self.file.read(&self.buf) catch |err| switch (err) {
-                    error.BrokenPipe => return null,
+                const n = self.file.readStreaming(self.io, &.{&self.buf}) catch |err| switch (err) {
+                    error.EndOfStream, error.ConnectionResetByPeer => return null,
                     else => return err,
                 };
                 if (n == 0) return null;
@@ -44,8 +45,8 @@ pub const LspTransport = struct {
                     pos += to_copy;
                 } else {
                     // Buffer empty — read directly into destination for large bodies
-                    const n = self.file.read(dest[pos..]) catch |err| switch (err) {
-                        error.BrokenPipe => return false,
+                    const n = self.file.readStreaming(self.io, &.{dest[pos..]}) catch |err| switch (err) {
+                        error.EndOfStream, error.ConnectionResetByPeer => return false,
                         else => return err,
                     };
                     if (n == 0) return false; // EOF
@@ -110,37 +111,43 @@ pub const LspTransport = struct {
 
     /// Write one LSP message to the given file (ZLS stdin pipe).
     /// Adds Content-Length header framing.
-    pub fn writeMessage(file: std.fs.File, data: []const u8) !void {
+    pub fn writeMessage(file: std.Io.File, io: std.Io, data: []const u8) !void {
         var header_buf: [64]u8 = undefined;
         var header_w: std.Io.Writer = .fixed(&header_buf);
         try header_w.print("Content-Length: {d}\r\n\r\n", .{data.len});
         const header = header_w.buffered();
 
-        try file.writeAll(header);
-        try file.writeAll(data);
+        try file.writeStreamingAll(io, header);
+        try file.writeStreamingAll(io, data);
     }
 
     /// Legacy static readMessage for backward compat (no buffering).
-    pub fn readMessage(file: std.fs.File, allocator: std.mem.Allocator) !?[]const u8 {
-        var reader = Reader.init(file);
+    pub fn readMessage(file: std.Io.File, io: std.Io, allocator: std.mem.Allocator) !?[]const u8 {
+        var reader = Reader.init(file, io);
         return reader.readMessage(allocator);
     }
 };
 
 // ── Tests ──
 
-fn testPipe() !struct { read_end: std.fs.File, write_end: std.fs.File } {
-    const fds = try std.posix.pipe();
+fn testIo() std.Io {
+    var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    return threaded.io();
+}
+
+fn testPipe() !struct { read_end: std.Io.File, write_end: std.Io.File } {
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&fds) != 0) return error.SystemResources;
     return .{
-        .read_end = .{ .handle = fds[0] },
-        .write_end = .{ .handle = fds[1] },
+        .read_end = .{ .handle = fds[0], .flags = .{ .nonblocking = false } },
+        .write_end = .{ .handle = fds[1], .flags = .{ .nonblocking = false } },
     };
 }
 
-fn readPipeAll(file: std.fs.File, buf: []u8) ![]const u8 {
+fn readPipeAll(file: std.Io.File, io: std.Io, buf: []u8) ![]const u8 {
     var total: usize = 0;
     while (total < buf.len) {
-        const n = try file.read(buf[total..]);
+        const n = file.readStreaming(io, &.{buf[total..]}) catch return buf[0..total];
         if (n == 0) break;
         total += n;
     }
@@ -148,38 +155,41 @@ fn readPipeAll(file: std.fs.File, buf: []u8) ![]const u8 {
 }
 
 test "writeMessage adds Content-Length framing" {
+    const io = testIo();
     const p = try testPipe();
-    defer p.read_end.close();
+    defer p.read_end.close(io);
 
-    try LspTransport.writeMessage(p.write_end, "hello");
-    p.write_end.close();
+    try LspTransport.writeMessage(p.write_end, io, "hello");
+    p.write_end.close(io);
 
     var buf: [64]u8 = undefined;
-    const data = try readPipeAll(p.read_end, &buf);
+    const data = try readPipeAll(p.read_end, io, &buf);
     try std.testing.expectEqualStrings("Content-Length: 5\r\n\r\nhello", data);
 }
 
 test "writeMessage empty body" {
+    const io = testIo();
     const p = try testPipe();
-    defer p.read_end.close();
+    defer p.read_end.close(io);
 
-    try LspTransport.writeMessage(p.write_end, "");
-    p.write_end.close();
+    try LspTransport.writeMessage(p.write_end, io, "");
+    p.write_end.close(io);
 
     var buf: [64]u8 = undefined;
-    const data = try readPipeAll(p.read_end, &buf);
+    const data = try readPipeAll(p.read_end, io, &buf);
     try std.testing.expectEqualStrings("Content-Length: 0\r\n\r\n", data);
 }
 
 test "Reader parses single message" {
     const alloc = std.testing.allocator;
+    const io = testIo();
     const p = try testPipe();
-    defer p.read_end.close();
+    defer p.read_end.close(io);
 
-    try LspTransport.writeMessage(p.write_end, "{\"ok\":true}");
-    p.write_end.close();
+    try LspTransport.writeMessage(p.write_end, io, "{\"ok\":true}");
+    p.write_end.close(io);
 
-    var reader = LspTransport.Reader.init(p.read_end);
+    var reader = LspTransport.Reader.init(p.read_end, io);
     const msg = (try reader.readMessage(alloc)).?;
     defer alloc.free(msg);
     try std.testing.expectEqualStrings("{\"ok\":true}", msg);
@@ -187,15 +197,16 @@ test "Reader parses single message" {
 
 test "Reader parses multiple sequential messages" {
     const alloc = std.testing.allocator;
+    const io = testIo();
     const p = try testPipe();
-    defer p.read_end.close();
+    defer p.read_end.close(io);
 
-    try LspTransport.writeMessage(p.write_end, "msg1");
-    try LspTransport.writeMessage(p.write_end, "msg2");
-    try LspTransport.writeMessage(p.write_end, "msg3");
-    p.write_end.close();
+    try LspTransport.writeMessage(p.write_end, io, "msg1");
+    try LspTransport.writeMessage(p.write_end, io, "msg2");
+    try LspTransport.writeMessage(p.write_end, io, "msg3");
+    p.write_end.close(io);
 
-    var reader = LspTransport.Reader.init(p.read_end);
+    var reader = LspTransport.Reader.init(p.read_end, io);
 
     const m1 = (try reader.readMessage(alloc)).?;
     defer alloc.free(m1);
@@ -214,34 +225,37 @@ test "Reader parses multiple sequential messages" {
 
 test "Reader returns null on empty pipe" {
     const alloc = std.testing.allocator;
+    const io = testIo();
     const p = try testPipe();
-    defer p.read_end.close();
-    p.write_end.close();
+    defer p.read_end.close(io);
+    p.write_end.close(io);
 
-    var reader = LspTransport.Reader.init(p.read_end);
+    var reader = LspTransport.Reader.init(p.read_end, io);
     try std.testing.expect(try reader.readMessage(alloc) == null);
 }
 
 test "Reader returns error on missing Content-Length" {
     const alloc = std.testing.allocator;
+    const io = testIo();
     const p = try testPipe();
-    defer p.read_end.close();
+    defer p.read_end.close(io);
 
-    try p.write_end.writeAll("Bad-Header: 5\r\n\r\nhello");
-    p.write_end.close();
+    try p.write_end.writeStreamingAll(io, "Bad-Header: 5\r\n\r\nhello");
+    p.write_end.close(io);
 
-    var reader = LspTransport.Reader.init(p.read_end);
+    var reader = LspTransport.Reader.init(p.read_end, io);
     try std.testing.expectError(error.MissingContentLength, reader.readMessage(alloc));
 }
 
 test "Reader returns error on zero Content-Length" {
     const alloc = std.testing.allocator;
+    const io = testIo();
     const p = try testPipe();
-    defer p.read_end.close();
+    defer p.read_end.close(io);
 
-    try p.write_end.writeAll("Content-Length: 0\r\n\r\n");
-    p.write_end.close();
+    try p.write_end.writeStreamingAll(io, "Content-Length: 0\r\n\r\n");
+    p.write_end.close(io);
 
-    var reader = LspTransport.Reader.init(p.read_end);
+    var reader = LspTransport.Reader.init(p.read_end, io);
     try std.testing.expectError(error.MissingContentLength, reader.readMessage(alloc));
 }

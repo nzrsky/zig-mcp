@@ -26,10 +26,12 @@ pub const McpServer = struct {
     doc_state: *DocumentState,
     workspace: *const Workspace,
     allocator: std.mem.Allocator,
+    io: std.Io,
     zls_process: ?*ZlsProcess = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         transport: *McpTransport,
         reg: *Registry,
         lsp_client: *LspClient,
@@ -43,6 +45,7 @@ pub const McpServer = struct {
             .doc_state = doc_state,
             .workspace = workspace,
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -250,6 +253,7 @@ pub const McpServer = struct {
             .doc_state = self.doc_state,
             .workspace = self.workspace,
             .allocator = allocator,
+            .io = self.io,
         };
 
         const result_text = handler(ctx, tool_args) catch |err| {
@@ -374,6 +378,11 @@ pub const McpServer = struct {
 
 // ── Tests ──
 
+fn testIo() std.Io {
+    var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    return threaded.io();
+}
+
 const TestSetup = struct {
     server: *McpServer,
     transport: *McpTransport,
@@ -381,24 +390,28 @@ const TestSetup = struct {
     lsp_client: *LspClient,
     doc_state: *DocumentState,
     workspace: *Workspace,
-    read_end: std.fs.File,
+    read_end: std.Io.File,
+    io: std.Io,
     write_end_closed: bool,
     alloc: std.mem.Allocator,
 
     fn init(alloc: std.mem.Allocator) !TestSetup {
-        const fds = try std.posix.pipe();
+        const io = testIo();
+        var fds: [2]std.c.fd_t = undefined;
+        if (std.c.pipe(&fds) != 0) return error.SystemResources;
 
         const transport = try alloc.create(McpTransport);
         transport.* = .{
-            .stdin_file = .{ .handle = fds[0] },
-            .stdout_file = .{ .handle = fds[1] },
+            .stdin_file = .{ .handle = fds[0], .flags = .{ .nonblocking = false } },
+            .stdout_file = .{ .handle = fds[1], .flags = .{ .nonblocking = false } },
+            .io = io,
         };
 
         const registry = try alloc.create(Registry);
         registry.* = Registry.init(alloc);
 
         const lsp_client = try alloc.create(LspClient);
-        lsp_client.* = LspClient.init(alloc);
+        lsp_client.* = LspClient.init(alloc, io);
 
         const workspace = try alloc.create(Workspace);
         workspace.* = try Workspace.init(alloc, "/tmp");
@@ -407,7 +420,7 @@ const TestSetup = struct {
         doc_state.* = DocumentState.init(alloc, "/tmp");
 
         const server = try alloc.create(McpServer);
-        server.* = McpServer.init(alloc, transport, registry, lsp_client, doc_state, workspace);
+        server.* = McpServer.init(alloc, io, transport, registry, lsp_client, doc_state, workspace);
 
         return .{
             .server = server,
@@ -416,7 +429,8 @@ const TestSetup = struct {
             .lsp_client = lsp_client,
             .doc_state = doc_state,
             .workspace = workspace,
-            .read_end = .{ .handle = fds[0] },
+            .read_end = .{ .handle = fds[0], .flags = .{ .nonblocking = false } },
+            .io = io,
             .write_end_closed = false,
             .alloc = alloc,
         };
@@ -425,22 +439,22 @@ const TestSetup = struct {
     /// Close write end and read all response data from pipe.
     fn getResponse(self: *TestSetup) ![]const u8 {
         if (!self.write_end_closed) {
-            self.transport.stdout_file.close();
+            self.transport.stdout_file.close(self.io);
             self.write_end_closed = true;
         }
         var buf: [8192]u8 = undefined;
         var total: usize = 0;
         while (total < buf.len) {
-            const n = try self.read_end.read(buf[total..]);
+            const n = self.read_end.readStreaming(self.io, &.{buf[total..]}) catch break;
             if (n == 0) break;
             total += n;
         }
-        return try self.alloc.dupe(u8, std.mem.trimRight(u8, buf[0..total], "\n"));
+        return try self.alloc.dupe(u8, std.mem.trimEnd(u8, buf[0..total], "\n"));
     }
 
     fn deinit(self: *TestSetup) void {
-        if (!self.write_end_closed) self.transport.stdout_file.close();
-        self.read_end.close();
+        if (!self.write_end_closed) self.transport.stdout_file.close(self.io);
+        self.read_end.close(self.io);
         self.doc_state.deinit();
         self.alloc.destroy(self.doc_state);
         self.workspace.deinit();

@@ -2,6 +2,7 @@ const std = @import("std");
 const LspClient = @import("../lsp/client.zig").LspClient;
 const lsp_types = @import("../lsp/types.zig");
 const uri_util = @import("../types/uri.zig");
+const PosixMutex = @import("../sync.zig").PosixMutex;
 
 /// Tracks which documents are open in the LSP session.
 /// Sends didOpen/didClose notifications as needed.
@@ -9,7 +10,8 @@ pub const DocumentState = struct {
     open_docs: std.StringHashMapUnmanaged(DocInfo),
     allocator: std.mem.Allocator,
     workspace_path: []const u8,
-    mutex: std.Thread.Mutex = .{},
+    io: ?std.Io = null,
+    mutex: PosixMutex = .{},
 
     const DocInfo = struct {
         version: i64,
@@ -20,6 +22,15 @@ pub const DocumentState = struct {
             .open_docs = .empty,
             .allocator = allocator,
             .workspace_path = workspace_path,
+        };
+    }
+
+    pub fn initWithIo(allocator: std.mem.Allocator, workspace_path: []const u8, io: std.Io) DocumentState {
+        return .{
+            .open_docs = .empty,
+            .allocator = allocator,
+            .workspace_path = workspace_path,
+            .io = io,
         };
     }
 
@@ -43,7 +54,8 @@ pub const DocumentState = struct {
         }
 
         // Slow path: read file content outside the lock (no mutex held during I/O)
-        const content = std.fs.cwd().readFileAlloc(self.allocator, abs_path, 10 * 1024 * 1024) catch |err| {
+        const io = self.io orelse return error.FileReadError;
+        const content = std.Io.Dir.cwd().readFileAlloc(io, abs_path, self.allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch |err| {
             return switch (err) {
                 error.FileNotFound => error.FileNotFound,
                 else => error.FileReadError,
@@ -111,7 +123,8 @@ pub const DocumentState = struct {
             const uri = entry.key_ptr.*;
             const path = uri_util.stripFilePrefix(uri);
 
-            const content = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch {
+            const io = self.io orelse continue;
+            const content = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch {
                 std.debug.print("[zig-mcp/docs] Failed to re-read {s} for reopen\n", .{path});
                 continue;
             };

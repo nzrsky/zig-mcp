@@ -183,7 +183,7 @@ pub fn registerAll(reg: *registry.Registry) !void {
         .name = "zig_version",
         .description = "Get Zig and ZLS version information",
         .inputSchema = .{
-            .properties = .{ .object = std.json.ObjectMap.init(reg.allocator) },
+            .properties = .{ .object = @as(std.json.ObjectMap, .empty) },
         },
     });
 
@@ -474,7 +474,7 @@ fn handleSignatureHelp(ctx: ToolContext, args: std.json.Value) ToolError![]const
 
 fn handleBuild(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const extra_args = getStringArg(args, "args");
-    return runZigCommand(ctx.allocator, ctx.workspace.root_path, "build", extra_args) catch return ToolError.CommandFailed;
+    return runZigCommand(ctx.allocator, ctx.io, ctx.workspace.root_path, "build", extra_args) catch return ToolError.CommandFailed;
 }
 
 fn handleTest(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
@@ -491,10 +491,10 @@ fn handleTest(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
             cmd_args.append(ctx.allocator, "--test-filter") catch return ToolError.OutOfMemory;
             cmd_args.append(ctx.allocator, filt) catch return ToolError.OutOfMemory;
         }
-        return runZigCommandArgs(ctx.allocator, ctx.workspace.root_path, cmd_args.items) catch return ToolError.CommandFailed;
+        return runZigCommandArgs(ctx.allocator, ctx.io, ctx.workspace.root_path, cmd_args.items) catch return ToolError.CommandFailed;
     } else {
         // zig build test
-        return runZigCommand(ctx.allocator, ctx.workspace.root_path, "build", "test") catch return ToolError.CommandFailed;
+        return runZigCommand(ctx.allocator, ctx.io, ctx.workspace.root_path, "build", "test") catch return ToolError.CommandFailed;
     }
 }
 
@@ -502,21 +502,21 @@ fn handleCheck(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
     const abs_path = uri_util.resolvePath(ctx.allocator, ctx.workspace.root_path, file) catch return ToolError.OutOfMemory;
     defer ctx.allocator.free(abs_path);
-    return runZigCommandArgs(ctx.allocator, ctx.workspace.root_path, &.{ "ast-check", abs_path }) catch return ToolError.CommandFailed;
+    return runZigCommandArgs(ctx.allocator, ctx.io, ctx.workspace.root_path, &.{ "ast-check", abs_path }) catch return ToolError.CommandFailed;
 }
 
 fn handleVersion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     _ = args;
-    const zig_ver = runZigCommand(ctx.allocator, ctx.workspace.root_path, "version", null) catch "unknown";
+    const zig_ver = runZigCommand(ctx.allocator, ctx.io, ctx.workspace.root_path, "version", null) catch "unknown";
     defer if (!std.mem.eql(u8, zig_ver, "unknown")) ctx.allocator.free(zig_ver);
 
-    const zls_ver = runCommandSlice(ctx.allocator, &.{ "zls", "--version" }, ctx.workspace.root_path) catch "unknown";
+    const zls_ver = runCommandSlice(ctx.allocator, ctx.io, &.{ "zls", "--version" }, ctx.workspace.root_path) catch "unknown";
     defer if (!std.mem.eql(u8, zls_ver, "unknown")) ctx.allocator.free(zls_ver);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     aw.writer.print("Zig: {s}\nZLS: {s}", .{
-        std.mem.trimRight(u8, zig_ver, "\n\r "),
-        std.mem.trimRight(u8, zls_ver, "\n\r "),
+        std.mem.trimEnd(u8, zig_ver, "\n\r "),
+        std.mem.trimEnd(u8, zls_ver, "\n\r "),
     }) catch return ToolError.OutOfMemory;
     return aw.toOwnedSlice() catch return ToolError.OutOfMemory;
 }
@@ -526,14 +526,14 @@ fn handleManage(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const version = getStringArg(args, "version");
 
     if (std.mem.eql(u8, action, "list")) {
-        return runCommandSlice(ctx.allocator, &.{ "zvm", "list" }, ctx.workspace.root_path) catch
+        return runCommandSlice(ctx.allocator, ctx.io, &.{ "zvm", "list" }, ctx.workspace.root_path) catch
             return ctx.allocator.dupe(u8, "zvm not found. Install from https://github.com/tristanisham/zvm") catch return ToolError.OutOfMemory;
     } else if (std.mem.eql(u8, action, "install")) {
         const ver = version orelse return ToolError.InvalidParams;
-        return runCommandSlice(ctx.allocator, &.{ "zvm", "install", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
+        return runCommandSlice(ctx.allocator, ctx.io, &.{ "zvm", "install", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
     } else if (std.mem.eql(u8, action, "use")) {
         const ver = version orelse return ToolError.InvalidParams;
-        return runCommandSlice(ctx.allocator, &.{ "zvm", "use", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
+        return runCommandSlice(ctx.allocator, ctx.io, &.{ "zvm", "use", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
     }
     return ToolError.InvalidParams;
 }
@@ -999,7 +999,7 @@ fn formatSignatureHelpResponse(allocator: std.mem.Allocator, response: []const u
 
 // ── Command execution helpers ──
 
-fn runZigCommand(allocator: std.mem.Allocator, cwd: []const u8, subcmd: []const u8, extra: ?[]const u8) ![]const u8 {
+fn runZigCommand(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8, subcmd: []const u8, extra: ?[]const u8) ![]const u8 {
     if (extra) |args_str| {
         // Split extra args by space
         var arg_list: std.ArrayList([]const u8) = .empty;
@@ -1010,31 +1010,31 @@ fn runZigCommand(allocator: std.mem.Allocator, cwd: []const u8, subcmd: []const 
         while (it.next()) |arg| {
             if (arg.len > 0) try arg_list.append(allocator, arg);
         }
-        return runCommandSlice(allocator, arg_list.items, cwd);
+        return runCommandSlice(allocator, io, arg_list.items, cwd);
     }
-    return runCommandSlice(allocator, &.{ "zig", subcmd }, cwd);
+    return runCommandSlice(allocator, io, &.{ "zig", subcmd }, cwd);
 }
 
-fn runZigCommandArgs(allocator: std.mem.Allocator, cwd: []const u8, args: []const []const u8) ![]const u8 {
+fn runZigCommandArgs(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8, args: []const []const u8) ![]const u8 {
     var arg_list: std.ArrayList([]const u8) = .empty;
     defer arg_list.deinit(allocator);
     try arg_list.append(allocator, "zig");
     for (args) |arg| {
         try arg_list.append(allocator, arg);
     }
-    return runCommandSlice(allocator, arg_list.items, cwd);
+    return runCommandSlice(allocator, io, arg_list.items, cwd);
 }
 
-fn runCommandSlice(allocator: std.mem.Allocator, argv: []const []const u8, cwd: []const u8) ![]const u8 {
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+fn runCommandSlice(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cwd: []const u8) ![]const u8 {
+    const result = try std.process.run(allocator, io, .{
         .argv = argv,
-        .cwd = cwd,
-        .max_output_bytes = 512 * 1024,
+        .cwd = .{ .path = cwd },
+        .stdout_limit = std.Io.Limit.limited(512 * 1024),
+        .stderr_limit = std.Io.Limit.limited(512 * 1024),
     });
     defer allocator.free(result.stderr);
 
-    if (result.term == .Exited and result.term.Exited == 0) {
+    if (result.term == .exited and result.term.exited == 0) {
         return result.stdout;
     }
 
@@ -1051,7 +1051,7 @@ fn runCommandSlice(allocator: std.mem.Allocator, argv: []const []const u8, cwd: 
     }
     if (result.stdout.len == 0 and result.stderr.len == 0) {
         const exit_code: u8 = switch (result.term) {
-            .Exited => |c| c,
+            .exited => |c| c,
             else => 1,
         };
         try aw.writer.print("Command exited with code {d}", .{exit_code});

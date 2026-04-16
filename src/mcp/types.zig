@@ -80,9 +80,9 @@ test "makeProperty builds valid schema" {
         var it = obj.iterator();
         while (it.next()) |entry| {
             var inner = entry.value_ptr.object;
-            inner.deinit();
+            inner.deinit(alloc);
         }
-        obj.deinit();
+        obj.deinit(alloc);
     }
     const file_prop = props.object.get("file").?.object;
     try std.testing.expectEqualStrings("string", file_prop.get("type").?.string);
@@ -97,7 +97,7 @@ test "makeProperty empty fields" {
     const props = try makeProperty(alloc, .{});
     defer {
         var obj = props.object;
-        obj.deinit();
+        obj.deinit(alloc);
     }
     try std.testing.expectEqual(@as(u32, 0), props.object.count());
 }
@@ -110,8 +110,8 @@ test "InputSchema default type is object" {
 
 test "Tool JSON serialization" {
     const alloc = std.testing.allocator;
-    var tool_props = std.json.ObjectMap.init(alloc);
-    defer tool_props.deinit();
+    var tool_props: std.json.ObjectMap = .empty;
+    defer tool_props.deinit(alloc);
     const tool = Tool{
         .name = "zig_test",
         .description = "Run tests",
@@ -186,14 +186,14 @@ test "ToolResult with error flag" {
 
 /// Helper: Build a property for an input schema.
 pub fn makeProperty(allocator: std.mem.Allocator, comptime fields: anytype) !std.json.Value {
-    var obj = std.json.ObjectMap.init(allocator);
+    var obj: std.json.ObjectMap = .empty;
     inline for (fields) |field| {
-        var prop = std.json.ObjectMap.init(allocator);
-        try prop.put("type", .{ .string = field.@"1" });
+        var prop: std.json.ObjectMap = .empty;
+        try prop.put(allocator, "type", .{ .string = field.@"1" });
         if (@hasField(@TypeOf(field), "2")) {
-            try prop.put("description", .{ .string = field.@"2" });
+            try prop.put(allocator, "description", .{ .string = field.@"2" });
         }
-        try obj.put(field.@"0", .{ .object = prop });
+        try obj.put(allocator, field.@"0", .{ .object = prop });
     }
     return .{ .object = obj };
 }

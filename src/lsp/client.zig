@@ -1,11 +1,12 @@
 const std = @import("std");
 const LspTransport = @import("transport.zig").LspTransport;
 const json_rpc = @import("../types/json_rpc.zig");
+const PosixMutex = @import("../sync.zig").PosixMutex;
 
 /// Pending request waiting for a response from ZLS.
 const PendingRequest = struct {
     response: ?[]const u8 = null,
-    event: std.Thread.ResetEvent = .{},
+    event: std.Io.Event = .unset,
     allocator: std.mem.Allocator,
 };
 
@@ -15,30 +16,32 @@ const PendingRequest = struct {
 /// - Main thread calls sendRequest() which blocks until reader thread delivers the response.
 /// - Reader thread runs readerLoop() reading ZLS stdout and dispatching responses/notifications.
 pub const LspClient = struct {
-    zls_stdin: ?std.fs.File,
-    zls_stdout: ?std.fs.File,
+    zls_stdin: ?std.Io.File,
+    zls_stdout: ?std.Io.File,
     next_id: std.atomic.Value(i64) = std.atomic.Value(i64).init(1),
     pending: std.AutoHashMapUnmanaged(i64, *PendingRequest),
-    pending_mutex: std.Thread.Mutex = .{},
+    pending_mutex: PosixMutex = .{},
     reader_thread: ?std.Thread = null,
     allocator: std.mem.Allocator,
+    io: std.Io,
     notification_callback: ?*const fn (method: []const u8, params: ?std.json.Value) void = null,
     diagnostics_callback: ?*const fn ([]const u8, []const u8) void = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     stderr_thread: ?std.Thread = null,
-    zls_stderr: ?std.fs.File = null,
+    zls_stderr: ?std.Io.File = null,
 
-    pub fn init(allocator: std.mem.Allocator) LspClient {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) LspClient {
         return .{
             .zls_stdin = null,
             .zls_stdout = null,
             .pending = .empty,
             .allocator = allocator,
+            .io = io,
         };
     }
 
     /// Connect to ZLS pipes and start reader thread.
-    pub fn connect(self: *LspClient, stdin: std.fs.File, stdout: std.fs.File, stderr: ?std.fs.File) !void {
+    pub fn connect(self: *LspClient, stdin: std.Io.File, stdout: std.Io.File, stderr: ?std.Io.File) !void {
         self.zls_stdin = stdin;
         self.zls_stdout = stdout;
         self.zls_stderr = stderr;
@@ -46,8 +49,8 @@ pub const LspClient = struct {
 
         self.reader_thread = try std.Thread.spawn(.{}, readerLoop, .{self});
 
-        if (stderr) |se| {
-            self.stderr_thread = try std.Thread.spawn(.{}, stderrLoop, .{se});
+        if (stderr) |_| {
+            self.stderr_thread = try std.Thread.spawn(.{}, stderrLoop, .{self});
         }
     }
 
@@ -65,7 +68,7 @@ pub const LspClient = struct {
         const stdin = self.zls_stdin orelse return error.NotConnected;
         const msg = try json_rpc.writeNotification(allocator, method, params);
         defer allocator.free(msg);
-        try LspTransport.writeMessage(stdin, msg);
+        try LspTransport.writeMessage(stdin, self.io, msg);
     }
 
     /// Send a notification with empty params object (avoids [] vs {} serialization issue).
@@ -78,7 +81,7 @@ pub const LspClient = struct {
         , .{method});
         const msg = try aw.toOwnedSlice();
         defer allocator.free(msg);
-        try LspTransport.writeMessage(stdin, msg);
+        try LspTransport.writeMessage(stdin, self.io, msg);
     }
 
     /// Send LSP initialize request and initialized notification.
@@ -132,10 +135,10 @@ pub const LspClient = struct {
             self.allocator.destroy(pending);
         }
 
-        try LspTransport.writeMessage(stdin, msg);
+        try LspTransport.writeMessage(stdin, self.io, msg);
 
         // Wait for response (30s timeout)
-        pending.event.timedWait(30 * std.time.ns_per_s) catch {
+        pending.event.waitTimeout(self.io, .{ .duration = .{ .raw = std.Io.Duration.fromSeconds(30), .clock = .awake } }) catch {
             self.pending_mutex.lock();
             defer self.pending_mutex.unlock();
             _ = self.pending.remove(id);
@@ -165,7 +168,7 @@ pub const LspClient = struct {
     /// Background thread: reads LSP messages from ZLS stdout, dispatches responses.
     fn readerLoop(self: *LspClient) void {
         const stdout = self.zls_stdout orelse return;
-        var reader = LspTransport.Reader.init(stdout);
+        var reader = LspTransport.Reader.init(stdout, self.io);
 
         while (self.running.load(.acquire)) {
             const msg = reader.readMessage(self.allocator) catch |err| {
@@ -208,7 +211,7 @@ pub const LspClient = struct {
                 if (maybe_pending) |p| {
                     // Store the full response body
                     p.response = self.allocator.dupe(u8, data) catch null;
-                    p.event.set();
+                    p.event.set(self.io);
                 }
             }
             // Notifications (diagnostics etc.) are silently dropped for now.
@@ -216,10 +219,11 @@ pub const LspClient = struct {
         }
     }
 
-    fn stderrLoop(stderr: std.fs.File) void {
+    fn stderrLoop(self: *LspClient) void {
+        const stderr = self.zls_stderr orelse return;
         var buf: [4096]u8 = undefined;
         while (true) {
-            const n = stderr.read(&buf) catch return;
+            const n = stderr.readStreaming(self.io, &.{&buf}) catch return;
             if (n == 0) return;
             log("ZLS stderr: {s}", .{buf[0..n]});
         }
@@ -231,7 +235,7 @@ pub const LspClient = struct {
         defer self.pending_mutex.unlock();
         var it = self.pending.iterator();
         while (it.next()) |entry| {
-            entry.value_ptr.*.event.set();
+            entry.value_ptr.*.event.set(self.io);
         }
     }
 
@@ -239,15 +243,15 @@ pub const LspClient = struct {
         self.running.store(false, .release);
         // Close all pipes to signal ZLS to exit and unblock reader threads
         if (self.zls_stdin) |stdin| {
-            stdin.close();
+            stdin.close(self.io);
             self.zls_stdin = null;
         }
         if (self.zls_stdout) |stdout| {
-            stdout.close();
+            stdout.close(self.io);
             self.zls_stdout = null;
         }
         if (self.zls_stderr) |se| {
-            se.close();
+            se.close(self.io);
             self.zls_stderr = null;
         }
         // Now safe to join — readers will see EOF from closed pipes
@@ -281,9 +285,15 @@ pub const LspClient = struct {
 
 // ── Tests ──
 
+fn testIo() std.Io {
+    var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    return threaded.io();
+}
+
 test "LspClient init creates disconnected client" {
     const alloc = std.testing.allocator;
-    var client = LspClient.init(alloc);
+    const io = testIo();
+    var client = LspClient.init(alloc, io);
     defer client.deinit();
 
     try std.testing.expect(client.zls_stdin == null);
@@ -294,7 +304,8 @@ test "LspClient init creates disconnected client" {
 
 test "sendRequest returns NotConnected when disconnected" {
     const alloc = std.testing.allocator;
-    var client = LspClient.init(alloc);
+    const io = testIo();
+    var client = LspClient.init(alloc, io);
     defer client.deinit();
 
     try std.testing.expectError(error.NotConnected, client.sendRequest(alloc, "textDocument/hover", .{}));
@@ -302,7 +313,8 @@ test "sendRequest returns NotConnected when disconnected" {
 
 test "sendNotification returns NotConnected when disconnected" {
     const alloc = std.testing.allocator;
-    var client = LspClient.init(alloc);
+    const io = testIo();
+    var client = LspClient.init(alloc, io);
     defer client.deinit();
 
     try std.testing.expectError(error.NotConnected, client.sendNotification(alloc, "textDocument/didOpen", .{}));
@@ -310,7 +322,8 @@ test "sendNotification returns NotConnected when disconnected" {
 
 test "sendRawNotification returns NotConnected when disconnected" {
     const alloc = std.testing.allocator;
-    var client = LspClient.init(alloc);
+    const io = testIo();
+    var client = LspClient.init(alloc, io);
     defer client.deinit();
 
     try std.testing.expectError(error.NotConnected, client.sendRawNotification(alloc, "initialized"));
@@ -318,7 +331,8 @@ test "sendRawNotification returns NotConnected when disconnected" {
 
 test "disconnect on already disconnected client is safe" {
     const alloc = std.testing.allocator;
-    var client = LspClient.init(alloc);
+    const io = testIo();
+    var client = LspClient.init(alloc, io);
     defer client.deinit();
 
     // Should not crash

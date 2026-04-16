@@ -13,7 +13,8 @@ pub const Workspace = struct {
             try allocator.dupe(u8, workspace_path)
         else blk: {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
-            const cwd = try std.process.getCwd(&buf);
+            const cwd_result = std.c.getcwd(&buf, buf.len) orelse return error.CurrentWorkingDirectoryUnlinked;
+            const cwd = std.mem.sliceTo(cwd_result, 0);
             break :blk try std.fs.path.join(allocator, &.{ cwd, workspace_path });
         };
         errdefer allocator.free(abs_path);
