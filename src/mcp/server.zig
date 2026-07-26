@@ -4,12 +4,12 @@ const mcp_types = @import("types.zig");
 const McpTransport = @import("transport.zig").McpTransport;
 const Registry = @import("../bridge/registry.zig").Registry;
 const ToolContext = @import("../bridge/registry.zig").ToolContext;
+const ToolError = @import("../bridge/registry.zig").ToolError;
 const LspClient = @import("../lsp/client.zig").LspClient;
 const DocumentState = @import("../state/documents.zig").DocumentState;
 const Workspace = @import("../state/workspace.zig").Workspace;
 const ZlsProcess = @import("../zls/process.zig").ZlsProcess;
-
-const log = std.log.scoped(.mcp_server);
+const testing = @import("../testing.zig");
 
 /// MCP server state machine.
 pub const State = enum {
@@ -17,6 +17,9 @@ pub const State = enum {
     running,
     shutdown,
 };
+
+pub const protocol_version = "2024-11-05";
+pub const server_version = "0.2.0";
 
 pub const McpServer = struct {
     state: State = .uninitialized,
@@ -52,42 +55,53 @@ pub const McpServer = struct {
     /// Main loop: read MCP messages, dispatch, respond.
     pub fn run(self: *McpServer) !void {
         while (self.state != .shutdown) {
-            const msg_data = try self.transport.readMessage(self.allocator);
-            if (msg_data == null) {
-                // stdin EOF — clean shutdown
-                break;
-            }
-            const data = msg_data.?;
+            const msg_data = (try self.transport.readMessage(self.allocator)) orelse break; // stdin EOF
+            defer self.allocator.free(msg_data);
 
             // Use arena for per-request allocation
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const arena_alloc = arena.allocator();
 
-            self.handleMessage(arena_alloc, data) catch |err| {
-                std.debug.print("[zig-mcp] Error handling message: {}\n", .{err});
-                // Try to send error response
+            self.handleMessage(arena_alloc, msg_data) catch |err| {
+                std.debug.print("[zig-mcp] Error handling message: {s}\n", .{@errorName(err)});
                 const error_resp = json_rpc.writeError(arena_alloc, null, json_rpc.ErrorCode.internal_error, "Internal error") catch continue;
-                self.transport.writeMessage(error_resp) catch {};
+                // A failed write means stdout is gone; there is no way to
+                // report anything after that, so stop rather than spin.
+                self.transport.writeMessage(error_resp) catch break;
             };
-
-            self.allocator.free(data);
         }
+    }
+
+    /// Write one response and release it. Keeps every caller allocator-agnostic
+    /// instead of relying on a request arena to mop up.
+    fn send(self: *McpServer, allocator: std.mem.Allocator, resp: []const u8) !void {
+        defer allocator.free(resp);
+        try self.transport.writeMessage(resp);
+    }
+
+    fn sendError(
+        self: *McpServer,
+        allocator: std.mem.Allocator,
+        id: ?json_rpc.RequestId,
+        code: i64,
+        message: []const u8,
+    ) !void {
+        try self.send(allocator, try json_rpc.writeError(allocator, id, code, message));
     }
 
     fn handleMessage(self: *McpServer, allocator: std.mem.Allocator, data: []const u8) !void {
         // Parse JSON-RPC message
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
-            const resp = try json_rpc.writeError(allocator, null, json_rpc.ErrorCode.parse_error, "Parse error");
-            try self.transport.writeMessage(resp);
+            try self.sendError(allocator, null, json_rpc.ErrorCode.parse_error, "Parse error");
             return;
         };
+        defer parsed.deinit();
 
         const obj = switch (parsed.value) {
             .object => |o| o,
             else => {
-                const resp = try json_rpc.writeError(allocator, null, json_rpc.ErrorCode.invalid_request, "Invalid request");
-                try self.transport.writeMessage(resp);
+                try self.sendError(allocator, null, json_rpc.ErrorCode.invalid_request, "Invalid request");
                 return;
             },
         };
@@ -105,8 +119,7 @@ pub const McpServer = struct {
             .string => |s| s,
             else => {
                 if (id != null) {
-                    const resp = try json_rpc.writeError(allocator, id, json_rpc.ErrorCode.invalid_request, "Missing method");
-                    try self.transport.writeMessage(resp);
+                    try self.sendError(allocator, id, json_rpc.ErrorCode.invalid_request, "Missing method");
                 }
                 return;
             },
@@ -123,8 +136,7 @@ pub const McpServer = struct {
         } else if (std.mem.eql(u8, method, "shutdown")) {
             self.state = .shutdown;
             if (id) |rid| {
-                const resp = try json_rpc.writeResponse(allocator, rid, null);
-                try self.transport.writeMessage(resp);
+                try self.send(allocator, try json_rpc.writeResponse(allocator, rid, null));
             }
         } else if (std.mem.eql(u8, method, "tools/list")) {
             try self.handleToolsList(allocator, id);
@@ -134,14 +146,12 @@ pub const McpServer = struct {
             try self.handleResourcesList(allocator, id);
         } else if (std.mem.eql(u8, method, "ping")) {
             if (id) |rid| {
-                const resp = try json_rpc.writeResponse(allocator, rid, .{});
-                try self.transport.writeMessage(resp);
+                try self.send(allocator, try json_rpc.writeResponse(allocator, rid, .{}));
             }
         } else {
             // Notifications (no id) are silently ignored
             if (id) |rid| {
-                const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.method_not_found, "Method not found");
-                try self.transport.writeMessage(resp);
+                try self.sendError(allocator, rid, json_rpc.ErrorCode.method_not_found, "Method not found");
             }
         }
     }
@@ -150,28 +160,29 @@ pub const McpServer = struct {
         const rid = id orelse return;
 
         const result = mcp_types.InitializeResult{
-            .protocolVersion = "2024-11-05",
+            .protocolVersion = protocol_version,
             .capabilities = .{
                 .tools = .{},
                 .resources = .{},
             },
             .serverInfo = .{
                 .name = "zig-mcp",
-                .version = "0.1.0",
+                .version = server_version,
             },
         };
 
-        const resp = try json_rpc.writeResponse(allocator, rid, result);
-        try self.transport.writeMessage(resp);
+        try self.send(allocator, try json_rpc.writeResponse(allocator, rid, result));
         self.state = .running;
     }
 
     fn handleToolsList(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId) !void {
         const rid = id orelse return;
         const tools = try self.registry.listTools(allocator);
+        defer allocator.free(tools);
 
-        // Build response manually for proper structure
+        // Built by hand so the schema shape matches what MCP clients expect.
         var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
         var jw: std.json.Stringify = .{
             .writer = &aw.writer,
             .options = .{},
@@ -213,8 +224,7 @@ pub const McpServer = struct {
         try jw.endObject();
         try jw.endObject();
 
-        const resp = try aw.toOwnedSlice();
-        try self.transport.writeMessage(resp);
+        try self.transport.writeMessage(aw.written());
     }
 
     fn handleToolsCall(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId, params: std.json.Value) !void {
@@ -224,8 +234,7 @@ pub const McpServer = struct {
         const params_obj = switch (params) {
             .object => |o| o,
             else => {
-                const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.invalid_params, "Invalid params");
-                try self.transport.writeMessage(resp);
+                try self.sendError(allocator, rid, json_rpc.ErrorCode.invalid_params, "Invalid params");
                 return;
             },
         };
@@ -233,8 +242,7 @@ pub const McpServer = struct {
         const tool_name = switch (params_obj.get("name") orelse .null) {
             .string => |s| s,
             else => {
-                const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.invalid_params, "Missing tool name");
-                try self.transport.writeMessage(resp);
+                try self.sendError(allocator, rid, json_rpc.ErrorCode.invalid_params, "Missing tool name");
                 return;
             },
         };
@@ -242,8 +250,7 @@ pub const McpServer = struct {
         const tool_args = params_obj.get("arguments") orelse .null;
 
         const handler = self.registry.getHandler(tool_name) orelse {
-            const resp = try json_rpc.writeError(allocator, rid, json_rpc.ErrorCode.method_not_found, "Unknown tool");
-            try self.transport.writeMessage(resp);
+            try self.sendError(allocator, rid, json_rpc.ErrorCode.method_not_found, "Unknown tool");
             return;
         };
 
@@ -258,8 +265,7 @@ pub const McpServer = struct {
 
         const result_text = handler(ctx, tool_args) catch |err| {
             // On connection failure, attempt reconnect + retry once
-            if ((err == error.NotConnected or err == error.LspError or err == error.NoResponse) and self.tryReconnectZls()) {
-                // Retry with reconnected client
+            if (isConnectionError(err) and self.tryReconnectZls()) {
                 const retry_text = handler(ctx, tool_args) catch |retry_err| {
                     try self.writeToolError(allocator, rid, retry_err);
                     return;
@@ -274,7 +280,14 @@ pub const McpServer = struct {
         try self.writeToolResult(allocator, rid, result_text, false);
     }
 
-    fn writeToolError(self: *McpServer, allocator: std.mem.Allocator, id: json_rpc.RequestId, err: anytype) !void {
+    fn isConnectionError(err: ToolError) bool {
+        return switch (err) {
+            error.NotConnected, error.LspError, error.NoResponse, error.ZlsNotRunning => true,
+            else => false,
+        };
+    }
+
+    fn writeToolError(self: *McpServer, allocator: std.mem.Allocator, id: json_rpc.RequestId, err: ToolError) !void {
         const err_msg = switch (err) {
             error.InvalidParams => "Invalid parameters",
             error.LspError => "LSP error",
@@ -292,6 +305,7 @@ pub const McpServer = struct {
 
     fn writeToolResult(self: *McpServer, allocator: std.mem.Allocator, id: json_rpc.RequestId, text: []const u8, is_error: bool) !void {
         var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
         var jw: std.json.Stringify = .{
             .writer = &aw.writer,
             .options = .{},
@@ -320,8 +334,7 @@ pub const McpServer = struct {
         try jw.endObject();
         try jw.endObject();
 
-        const resp = try aw.toOwnedSlice();
-        try self.transport.writeMessage(resp);
+        try self.transport.writeMessage(aw.written());
     }
 
     /// Attempt to reconnect to ZLS after a crash. Returns true on success.
@@ -330,10 +343,12 @@ pub const McpServer = struct {
 
         std.debug.print("[zig-mcp] Attempting ZLS reconnection...\n", .{});
 
-        // Disconnect old LSP session (closes old pipes, joins threads)
+        // Kill first, disconnect second. Closing pipes under a reader thread
+        // that is still blocked on them would neither wake it nor free the
+        // descriptor before the respawn claims the same numbers.
+        zls_proc.kill();
         self.lsp_client.disconnect();
 
-        // Respawn ZLS
         const restarted = zls_proc.restart() catch {
             std.debug.print("[zig-mcp] ZLS restart failed\n", .{});
             return false;
@@ -370,110 +385,107 @@ pub const McpServer = struct {
 
     fn handleResourcesList(self: *McpServer, allocator: std.mem.Allocator, id: ?json_rpc.RequestId) !void {
         const rid = id orelse return;
-        // Return empty resource list for now
-        const resp = try json_rpc.writeResponse(allocator, rid, .{ .resources = &[_]u8{} });
-        try self.transport.writeMessage(resp);
+        // `resources` must be a JSON array. An empty `[]const u8` would
+        // serialize as the string "", which clients reject.
+        const empty: []const mcp_types.Resource = &.{};
+        try self.send(allocator, try json_rpc.writeResponse(allocator, rid, .{ .resources = empty }));
     }
 };
 
 // ── Tests ──
 
-fn testIo() std.Io {
-    var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
-    return threaded.io();
-}
-
 const TestSetup = struct {
-    server: *McpServer,
-    transport: *McpTransport,
-    registry: *Registry,
-    lsp_client: *LspClient,
-    doc_state: *DocumentState,
-    workspace: *Workspace,
+    server: McpServer,
+    transport: McpTransport,
+    registry: Registry,
+    lsp_client: LspClient,
+    doc_state: DocumentState,
+    workspace: Workspace,
     read_end: std.Io.File,
-    io: std.Io,
-    write_end_closed: bool,
+    write_end: std.Io.File,
+    write_end_closed: bool = false,
     alloc: std.mem.Allocator,
 
+    /// Two-phase like the other fixtures: `McpServer` stores pointers into this
+    /// struct, so it can only be built once the struct is at its final address.
     fn init(alloc: std.mem.Allocator) !TestSetup {
-        const io = testIo();
-        var fds: [2]std.c.fd_t = undefined;
-        if (std.c.pipe(&fds) != 0) return error.SystemResources;
-
-        const transport = try alloc.create(McpTransport);
-        transport.* = .{
-            .stdin_file = .{ .handle = fds[0], .flags = .{ .nonblocking = false } },
-            .stdout_file = .{ .handle = fds[1], .flags = .{ .nonblocking = false } },
-            .io = io,
-        };
-
-        const registry = try alloc.create(Registry);
-        registry.* = Registry.init(alloc);
-
-        const lsp_client = try alloc.create(LspClient);
-        lsp_client.* = LspClient.init(alloc, io);
-
-        const workspace = try alloc.create(Workspace);
-        workspace.* = try Workspace.init(alloc, "/tmp");
-
-        const doc_state = try alloc.create(DocumentState);
-        doc_state.* = DocumentState.init(alloc, "/tmp");
-
-        const server = try alloc.create(McpServer);
-        server.* = McpServer.init(alloc, io, transport, registry, lsp_client, doc_state, workspace);
-
+        const p = try testing.Pipe.open();
         return .{
-            .server = server,
-            .transport = transport,
-            .registry = registry,
-            .lsp_client = lsp_client,
-            .doc_state = doc_state,
-            .workspace = workspace,
-            .read_end = .{ .handle = fds[0], .flags = .{ .nonblocking = false } },
-            .io = io,
-            .write_end_closed = false,
+            // SAFETY: assigned by `start`, which every test calls before
+            // touching the server. It cannot be built here because it
+            // stores pointers into this struct.
+            .server = undefined,
+            .transport = .{
+                .stdin_file = p.read_end,
+                .stdout_file = p.write_end,
+                .io = testing.io(),
+            },
+            .registry = Registry.init(alloc),
+            .lsp_client = LspClient.init(alloc, testing.io()),
+            .doc_state = DocumentState.init(alloc, "/tmp", testing.io()),
+            .workspace = try Workspace.init(alloc, "/tmp"),
+            .read_end = p.read_end,
+            .write_end = p.write_end,
             .alloc = alloc,
         };
+    }
+
+    fn start(self: *TestSetup) void {
+        self.server = McpServer.init(
+            self.alloc,
+            testing.io(),
+            &self.transport,
+            &self.registry,
+            &self.lsp_client,
+            &self.doc_state,
+            &self.workspace,
+        );
+    }
+
+    fn handle(self: *TestSetup, message: []const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        try self.server.handleMessage(arena.allocator(), message);
     }
 
     /// Close write end and read all response data from pipe.
     fn getResponse(self: *TestSetup) ![]const u8 {
         if (!self.write_end_closed) {
-            self.transport.stdout_file.close(self.io);
+            self.write_end.close(testing.io());
             self.write_end_closed = true;
         }
         var buf: [8192]u8 = undefined;
-        var total: usize = 0;
-        while (total < buf.len) {
-            const n = self.read_end.readStreaming(self.io, &.{buf[total..]}) catch break;
-            if (n == 0) break;
-            total += n;
-        }
-        return try self.alloc.dupe(u8, std.mem.trimEnd(u8, buf[0..total], "\n"));
+        const data = try testing.readAll(self.read_end, &buf);
+        return self.alloc.dupe(u8, std.mem.trimEnd(u8, data, "\n"));
     }
 
     fn deinit(self: *TestSetup) void {
-        if (!self.write_end_closed) self.transport.stdout_file.close(self.io);
-        self.read_end.close(self.io);
+        const io = testing.io();
+        if (!self.write_end_closed) self.write_end.close(io);
+        self.read_end.close(io);
         self.doc_state.deinit();
-        self.alloc.destroy(self.doc_state);
         self.workspace.deinit();
-        self.alloc.destroy(self.workspace);
         self.lsp_client.deinit();
-        self.alloc.destroy(self.lsp_client);
         self.registry.deinit();
-        self.alloc.destroy(self.registry);
-        self.alloc.destroy(self.transport);
-        self.alloc.destroy(self.server);
     }
 };
+
+fn expectErrorCode(alloc: std.mem.Allocator, ctx: *TestSetup, code: i64) !void {
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(code, err.get("code").?.integer);
+}
 
 test "handleMessage initialize" {
     const alloc = std.testing.allocator;
     var ctx = try TestSetup.init(alloc);
+    ctx.start();
     defer ctx.deinit();
 
-    try ctx.server.handleMessage(alloc,
+    try ctx.handle(
         \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
     );
 
@@ -483,18 +495,20 @@ test "handleMessage initialize" {
     defer parsed.deinit();
 
     const result = parsed.value.object.get("result").?.object;
-    try std.testing.expectEqualStrings("2024-11-05", result.get("protocolVersion").?.string);
+    try std.testing.expectEqualStrings(protocol_version, result.get("protocolVersion").?.string);
     const info = result.get("serverInfo").?.object;
     try std.testing.expectEqualStrings("zig-mcp", info.get("name").?.string);
+    try std.testing.expectEqualStrings(server_version, info.get("version").?.string);
     try std.testing.expectEqual(State.running, ctx.server.state);
 }
 
 test "handleMessage ping" {
     const alloc = std.testing.allocator;
     var ctx = try TestSetup.init(alloc);
+    ctx.start();
     defer ctx.deinit();
 
-    try ctx.server.handleMessage(alloc,
+    try ctx.handle(
         \\{"jsonrpc":"2.0","id":42,"method":"ping"}
     );
 
@@ -510,9 +524,10 @@ test "handleMessage ping" {
 test "handleMessage shutdown" {
     const alloc = std.testing.allocator;
     var ctx = try TestSetup.init(alloc);
+    ctx.start();
     defer ctx.deinit();
 
-    try ctx.server.handleMessage(alloc,
+    try ctx.handle(
         \\{"jsonrpc":"2.0","id":1,"method":"shutdown"}
     );
 
@@ -528,9 +543,10 @@ test "handleMessage shutdown" {
 test "notifications/initialized sets state to running" {
     const alloc = std.testing.allocator;
     var ctx = try TestSetup.init(alloc);
+    ctx.start();
     defer ctx.deinit();
 
-    try ctx.server.handleMessage(alloc,
+    try ctx.handle(
         \\{"jsonrpc":"2.0","method":"notifications/initialized"}
     );
 
@@ -540,96 +556,159 @@ test "notifications/initialized sets state to running" {
 test "handleMessage unknown method returns method_not_found" {
     const alloc = std.testing.allocator;
     var ctx = try TestSetup.init(alloc);
+    ctx.start();
     defer ctx.deinit();
 
-    try ctx.server.handleMessage(alloc,
+    try ctx.handle(
         \\{"jsonrpc":"2.0","id":1,"method":"nonexistent/method"}
     );
-
-    const resp = try ctx.getResponse();
-    defer alloc.free(resp);
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
-    defer parsed.deinit();
-
-    const err = parsed.value.object.get("error").?.object;
-    try std.testing.expectEqual(@as(i64, -32601), err.get("code").?.integer);
+    try expectErrorCode(alloc, &ctx, -32601);
 }
 
 test "handleMessage invalid JSON returns parse_error" {
     const alloc = std.testing.allocator;
     var ctx = try TestSetup.init(alloc);
+    ctx.start();
     defer ctx.deinit();
 
-    try ctx.server.handleMessage(alloc, "not valid json{{{");
-
-    const resp = try ctx.getResponse();
-    defer alloc.free(resp);
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
-    defer parsed.deinit();
-
-    const err = parsed.value.object.get("error").?.object;
-    try std.testing.expectEqual(@as(i64, -32700), err.get("code").?.integer);
+    try ctx.handle("not valid json{{{");
+    try expectErrorCode(alloc, &ctx, -32700);
 }
 
 test "handleMessage non-object JSON returns invalid_request" {
     const alloc = std.testing.allocator;
     var ctx = try TestSetup.init(alloc);
+    ctx.start();
     defer ctx.deinit();
 
-    try ctx.server.handleMessage(alloc, "[1,2,3]");
-
-    const resp = try ctx.getResponse();
-    defer alloc.free(resp);
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
-    defer parsed.deinit();
-
-    const err = parsed.value.object.get("error").?.object;
-    try std.testing.expectEqual(@as(i64, -32600), err.get("code").?.integer);
+    try ctx.handle("[1,2,3]");
+    try expectErrorCode(alloc, &ctx, -32600);
 }
 
 test "handleMessage missing method returns invalid_request" {
     const alloc = std.testing.allocator;
     var ctx = try TestSetup.init(alloc);
+    ctx.start();
     defer ctx.deinit();
 
-    try ctx.server.handleMessage(alloc,
+    try ctx.handle(
         \\{"jsonrpc":"2.0","id":1}
+    );
+    try expectErrorCode(alloc, &ctx, -32600);
+}
+
+test "notification without id produces no response" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    ctx.start();
+    defer ctx.deinit();
+
+    try ctx.handle(
+        \\{"jsonrpc":"2.0","method":"nonexistent/notification"}
     );
 
     const resp = try ctx.getResponse();
     defer alloc.free(resp);
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
-    defer parsed.deinit();
-
-    const err = parsed.value.object.get("error").?.object;
-    try std.testing.expectEqual(@as(i64, -32600), err.get("code").?.integer);
+    try std.testing.expectEqualStrings("", resp);
 }
 
 test "handleMessage tools/call unknown tool" {
     const alloc = std.testing.allocator;
     var ctx = try TestSetup.init(alloc);
+    ctx.start();
     defer ctx.deinit();
 
-    try ctx.server.handleMessage(alloc,
+    try ctx.handle(
         \\{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nonexistent"}}
     );
-
-    const resp = try ctx.getResponse();
-    defer alloc.free(resp);
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
-    defer parsed.deinit();
-
-    const err = parsed.value.object.get("error").?.object;
-    try std.testing.expectEqual(@as(i64, -32601), err.get("code").?.integer);
+    try expectErrorCode(alloc, &ctx, -32601);
 }
 
 test "handleMessage tools/call invalid params" {
     const alloc = std.testing.allocator;
     var ctx = try TestSetup.init(alloc);
+    ctx.start();
     defer ctx.deinit();
 
-    try ctx.server.handleMessage(alloc,
+    try ctx.handle(
         \\{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"not_object"}
+    );
+    try expectErrorCode(alloc, &ctx, -32602);
+}
+
+test "handleMessage tools/call reports a failing tool as an MCP error result" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    ctx.start();
+    defer ctx.deinit();
+
+    const Failing = struct {
+        fn handler(_: ToolContext, _: std.json.Value) ToolError![]const u8 {
+            return error.FileNotFound;
+        }
+    };
+    try ctx.registry.register(Failing.handler, .{
+        .name = "boom",
+        .description = "always fails",
+        .inputSchema = .{},
+    });
+
+    try ctx.handle(
+        \\{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"boom","arguments":{}}}
+    );
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expect(result.get("isError").?.bool);
+    try std.testing.expectEqualStrings(
+        "File not found",
+        result.get("content").?.array.items[0].object.get("text").?.string,
+    );
+}
+
+test "resources/list returns an empty JSON array, not an empty string" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    ctx.start();
+    defer ctx.deinit();
+
+    try ctx.handle(
+        \\{"jsonrpc":"2.0","id":1,"method":"resources/list"}
+    );
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+    const resources = parsed.value.object.get("result").?.object.get("resources").?;
+    try std.testing.expect(resources == .array);
+    try std.testing.expectEqual(@as(usize, 0), resources.array.items.len);
+}
+
+test "tools/list emits an object schema for every registered tool" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    ctx.start();
+    defer ctx.deinit();
+
+    const Noop = struct {
+        fn handler(_: ToolContext, _: std.json.Value) ToolError![]const u8 {
+            return "ok";
+        }
+    };
+    // The registry takes ownership of the schema.
+    const props: std.json.ObjectMap = .empty;
+    try ctx.registry.register(Noop.handler, .{
+        .name = "thing",
+        .description = "does a thing",
+        .inputSchema = .{ .properties = .{ .object = props }, .required = &.{"file"} },
+    });
+
+    try ctx.handle(
+        \\{"jsonrpc":"2.0","id":1,"method":"tools/list"}
     );
 
     const resp = try ctx.getResponse();
@@ -637,6 +716,58 @@ test "handleMessage tools/call invalid params" {
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
     defer parsed.deinit();
 
-    const err = parsed.value.object.get("error").?.object;
-    try std.testing.expectEqual(@as(i64, -32602), err.get("code").?.integer);
+    const tools = parsed.value.object.get("result").?.object.get("tools").?.array;
+    try std.testing.expectEqual(@as(usize, 1), tools.items.len);
+    const schema = tools.items[0].object.get("inputSchema").?.object;
+    try std.testing.expectEqualStrings("object", schema.get("type").?.string);
+    // Never `null`: MCP clients drop tools whose properties are not an object.
+    try std.testing.expect(schema.get("properties").? == .object);
+    try std.testing.expectEqualStrings("file", schema.get("required").?.array.items[0].string);
+}
+
+test "string request ids are echoed back unchanged" {
+    const alloc = std.testing.allocator;
+    var ctx = try TestSetup.init(alloc);
+    ctx.start();
+    defer ctx.deinit();
+
+    try ctx.handle(
+        \\{"jsonrpc":"2.0","id":"abc-1","method":"ping"}
+    );
+
+    const resp = try ctx.getResponse();
+    defer alloc.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("abc-1", parsed.value.object.get("id").?.string);
+}
+
+test "handleMessage survives allocation failure at every step" {
+    // Injected OOM must never leak: the arena is gone by the time the failure
+    // propagates, so anything allocated from the test allocator has to be
+    // released on the error path.
+    const alloc = std.testing.allocator;
+    const payloads = [_][]const u8{
+        \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+        ,
+        \\{"jsonrpc":"2.0","id":1,"method":"tools/list"}
+        ,
+        \\{"jsonrpc":"2.0","id":1,"method":"resources/list"}
+        ,
+        \\{"jsonrpc":"2.0","id":1,"method":"nope"}
+        ,
+        "not json",
+    };
+
+    for (payloads) |payload| {
+        var i: usize = 0;
+        while (i < 64) : (i += 1) {
+            var ctx = try TestSetup.init(alloc);
+            ctx.start();
+            defer ctx.deinit();
+
+            var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = i });
+            ctx.server.handleMessage(failing.allocator(), payload) catch {};
+        }
+    }
 }

@@ -75,15 +75,7 @@ test "makeProperty builds valid schema" {
         .{ "file", "string", "A file path" },
         .{ "line", "integer", "Line number" },
     });
-    defer {
-        var obj = props.object;
-        var it = obj.iterator();
-        while (it.next()) |entry| {
-            var inner = entry.value_ptr.object;
-            inner.deinit(alloc);
-        }
-        obj.deinit(alloc);
-    }
+    defer freeProperties(alloc, props);
     const file_prop = props.object.get("file").?.object;
     try std.testing.expectEqualStrings("string", file_prop.get("type").?.string);
     try std.testing.expectEqualStrings("A file path", file_prop.get("description").?.string);
@@ -95,11 +87,12 @@ test "makeProperty builds valid schema" {
 test "makeProperty empty fields" {
     const alloc = std.testing.allocator;
     const props = try makeProperty(alloc, .{});
-    defer {
-        var obj = props.object;
-        obj.deinit(alloc);
-    }
+    defer freeProperties(alloc, props);
     try std.testing.expectEqual(@as(u32, 0), props.object.count());
+}
+
+test "freeProperties tolerates a null schema" {
+    freeProperties(std.testing.allocator, .null);
 }
 
 test "InputSchema default type is object" {
@@ -185,10 +178,14 @@ test "ToolResult with error flag" {
 }
 
 /// Helper: Build a property for an input schema.
+/// The returned value owns two levels of `ObjectMap`; release it with
+/// `freeProperties`.
 pub fn makeProperty(allocator: std.mem.Allocator, comptime fields: anytype) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
+    errdefer freeProperties(allocator, .{ .object = obj });
     inline for (fields) |field| {
         var prop: std.json.ObjectMap = .empty;
+        errdefer prop.deinit(allocator);
         try prop.put(allocator, "type", .{ .string = field.@"1" });
         if (@hasField(@TypeOf(field), "2")) {
             try prop.put(allocator, "description", .{ .string = field.@"2" });
@@ -196,4 +193,24 @@ pub fn makeProperty(allocator: std.mem.Allocator, comptime fields: anytype) !std
         try obj.put(allocator, field.@"0", .{ .object = prop });
     }
     return .{ .object = obj };
+}
+
+/// Release a value built by `makeProperty`. Safe on `.null` and on schemas
+/// holding a bare empty map.
+pub fn freeProperties(allocator: std.mem.Allocator, properties: std.json.Value) void {
+    var obj = switch (properties) {
+        .object => |o| o,
+        else => return,
+    };
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        switch (entry.value_ptr.*) {
+            .object => |inner| {
+                var m = inner;
+                m.deinit(allocator);
+            },
+            else => {},
+        }
+    }
+    obj.deinit(allocator);
 }

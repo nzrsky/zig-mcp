@@ -1,6 +1,7 @@
 const std = @import("std");
 const McpTransport = @import("mcp/transport.zig").McpTransport;
 const McpServer = @import("mcp/server.zig").McpServer;
+const server_version = @import("mcp/server.zig").server_version;
 const LspClient = @import("lsp/client.zig").LspClient;
 const ZlsProcess = @import("zls/process.zig").ZlsProcess;
 const findZls = @import("zls/process.zig").findZls;
@@ -8,13 +9,15 @@ const Registry = @import("bridge/registry.zig").Registry;
 const tools = @import("bridge/tools.zig");
 const DocumentState = @import("state/documents.zig").DocumentState;
 const Workspace = @import("state/workspace.zig").Workspace;
-const uri_util = @import("types/uri.zig");
 
 // Pull in test references
 comptime {
     _ = @import("types/json_rpc.zig");
     _ = @import("types/uri.zig");
     _ = @import("mcp/transport.zig");
+    _ = @import("mcp/server.zig");
+    _ = @import("testing.zig");
+    _ = @import("test_zls.zig");
     _ = @import("lsp/transport.zig");
     _ = @import("lsp/types.zig");
     _ = @import("mcp/types.zig");
@@ -60,15 +63,18 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--workspace") or std.mem.eql(u8, arg, "-w")) {
-            workspace_path = args.next();
+            workspace_path = args.next() orelse return missingValue(arg);
         } else if (std.mem.eql(u8, arg, "--zls-path")) {
-            zls_path_arg = args.next();
+            zls_path_arg = args.next() orelse return missingValue(arg);
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printUsage();
             return;
         } else if (std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("zig-mcp 0.1.0\n", .{});
+            std.debug.print("zig-mcp {s}\n", .{server_version});
             return;
+        } else {
+            std.debug.print("Error: unknown option '{s}'. Try --help.\n", .{arg});
+            std.process.exit(2);
         }
     }
 
@@ -104,18 +110,20 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(zls_path);
     std.debug.print("[zig-mcp] ZLS: {s}\n", .{zls_path});
 
+    // Declared before the process on purpose: deferred cleanup runs in reverse,
+    // so ZLS is killed *before* the LSP session is torn down. The reader thread
+    // only unblocks once the child's end of the pipe is gone.
+    var lsp_client = LspClient.init(allocator, init.io);
+    defer lsp_client.deinit();
+
     // Spawn ZLS
     var zls_proc = ZlsProcess.init(allocator, init.io, workspace.root_path, zls_path);
     defer zls_proc.deinit();
 
     zls_proc.spawn() catch |err| {
-        std.debug.print("[zig-mcp] Failed to spawn ZLS: {}\n", .{err});
+        std.debug.print("[zig-mcp] Failed to spawn ZLS: {s}\n", .{@errorName(err)});
         return runWithoutZls(allocator, init.io, &workspace);
     };
-
-    // Initialize LSP client
-    var lsp_client = LspClient.init(allocator, init.io);
-    defer lsp_client.deinit();
 
     const zls_stdin = zls_proc.getStdin() orelse {
         std.debug.print("[zig-mcp] Failed to get ZLS stdin pipe\n", .{});
@@ -135,14 +143,14 @@ pub fn main(init: std.process.Init) !void {
     // LSP initialize handshake
     std.debug.print("[zig-mcp] Initializing LSP session...\n", .{});
     const init_response = lsp_client.initialize(allocator, workspace.root_uri) catch |err| {
-        std.debug.print("[zig-mcp] LSP initialize failed: {}\n", .{err});
+        std.debug.print("[zig-mcp] LSP initialize failed: {s}\n", .{@errorName(err)});
         return runWithoutZls(allocator, init.io, &workspace);
     };
     allocator.free(init_response);
     std.debug.print("[zig-mcp] LSP session initialized\n", .{});
 
     // Initialize document state
-    var doc_state = DocumentState.initWithIo(allocator, workspace.root_path, init.io);
+    var doc_state = DocumentState.init(allocator, workspace.root_path, init.io);
     defer doc_state.deinit();
 
     // Initialize tool registry
@@ -164,7 +172,7 @@ pub fn main(init: std.process.Init) !void {
 
 /// Run in degraded mode without ZLS (command tools only).
 fn runWithoutZls(allocator: std.mem.Allocator, io: std.Io, workspace: *Workspace) !void {
-    var doc_state = DocumentState.init(allocator, workspace.root_path);
+    var doc_state = DocumentState.init(allocator, workspace.root_path, io);
     defer doc_state.deinit();
 
     var lsp_client = LspClient.init(allocator, io);
@@ -178,6 +186,11 @@ fn runWithoutZls(allocator: std.mem.Allocator, io: std.Io, workspace: *Workspace
     var server = McpServer.init(allocator, io, &transport, &registry, &lsp_client, &doc_state, workspace);
     std.debug.print("[zig-mcp] Running without ZLS (command tools only)\n", .{});
     try server.run();
+}
+
+fn missingValue(option: []const u8) noreturn {
+    std.debug.print("Error: '{s}' requires a value. Try --help.\n", .{option});
+    std.process.exit(2);
 }
 
 fn printUsage() void {

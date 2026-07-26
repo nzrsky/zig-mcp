@@ -1,6 +1,5 @@
 const std = @import("std");
 const mcp_types = @import("../mcp/types.zig");
-const json_rpc = @import("../types/json_rpc.zig");
 const LspClient = @import("../lsp/client.zig").LspClient;
 const DocumentState = @import("../state/documents.zig").DocumentState;
 const Workspace = @import("../state/workspace.zig").Workspace;
@@ -47,11 +46,18 @@ pub const Registry = struct {
         };
     }
 
+    /// Takes ownership of `definition.inputSchema.properties`, which `deinit`
+    /// releases. On failure the schema is released here so the caller never has
+    /// to guess who owns it.
     pub fn register(self: *Registry, handler: ToolHandler, definition: mcp_types.Tool) !void {
-        try self.entries.put(self.allocator, definition.name, .{
+        errdefer mcp_types.freeProperties(self.allocator, definition.inputSchema.properties);
+
+        if (self.entries.fetchPut(self.allocator, definition.name, .{
             .handler = handler,
             .definition = definition,
-        });
+        })) |previous| {
+            if (previous) |old| mcp_types.freeProperties(self.allocator, old.value.definition.inputSchema.properties);
+        } else |err| return err;
     }
 
     pub fn getHandler(self: *const Registry, name: []const u8) ?ToolHandler {
@@ -73,6 +79,10 @@ pub const Registry = struct {
     }
 
     pub fn deinit(self: *Registry) void {
+        var it = self.entries.iterator();
+        while (it.next()) |entry| {
+            mcp_types.freeProperties(self.allocator, entry.value_ptr.definition.inputSchema.properties);
+        }
         self.entries.deinit(self.allocator);
     }
 };
@@ -150,6 +160,43 @@ test "Registry listTools returns all definitions" {
     const tools = try reg.listTools(alloc);
     defer alloc.free(tools);
     try std.testing.expectEqual(@as(usize, 2), tools.len);
+}
+
+test "Registry frees the schemas it owns" {
+    // Caught only by the leak checker: the schema maps used to outlive the
+    // registry with nothing left holding a reference to them.
+    const alloc = std.testing.allocator;
+    var reg = Registry.init(alloc);
+    defer reg.deinit();
+
+    try reg.register(dummyHandler, .{
+        .name = "owns_schema",
+        .description = "has properties",
+        .inputSchema = .{
+            .properties = try mcp_types.makeProperty(alloc, .{
+                .{ "file", "string", "A file path" },
+            }),
+        },
+    });
+}
+
+test "re-registering a tool releases the previous schema" {
+    const alloc = std.testing.allocator;
+    var reg = Registry.init(alloc);
+    defer reg.deinit();
+
+    for (0..3) |_| {
+        try reg.register(dummyHandler, .{
+            .name = "same_name",
+            .description = "registered repeatedly",
+            .inputSchema = .{
+                .properties = try mcp_types.makeProperty(alloc, .{
+                    .{ "file", "string", "A file path" },
+                }),
+            },
+        });
+    }
+    try std.testing.expectEqual(@as(u32, 1), reg.entries.count());
 }
 
 test "Registry empty listTools" {

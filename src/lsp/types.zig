@@ -53,6 +53,17 @@ pub const DidCloseTextDocumentParams = struct {
     textDocument: TextDocumentIdentifier,
 };
 
+/// A whole-document replacement (full text sync).
+pub const FullTextChange = struct {
+    text: []const u8,
+};
+
+/// LSP DidChangeTextDocumentParams, full-sync flavour.
+pub const DidChangeTextDocumentParams = struct {
+    textDocument: VersionedTextDocumentIdentifier,
+    contentChanges: []const FullTextChange,
+};
+
 /// LSP Diagnostic.
 pub const Diagnostic = struct {
     range: Range,

@@ -12,7 +12,7 @@ AI assistant  <--(MCP stdio)-->  zig-mcp  <--(LSP pipes)-->  ZLS
 
 ## Requirements
 
-- [Zig](https://ziglang.org/download/) 0.15.2+
+- [Zig](https://ziglang.org/download/) 0.17.0-dev.1415+64dfaa568 or newer
 - [ZLS](https://github.com/zigtools/zls/releases) (auto-detected from PATH, or specify with `--zls-path`)
 
 ## Install
@@ -154,7 +154,7 @@ Three threads:
 
 If ZLS crashes, zig-mcp automatically restarts it and re-opens all tracked documents.
 
-Files are opened in ZLS lazily on first access -- no need to manage document state manually.
+Files are opened in ZLS lazily on first access, and re-synced (`didChange`) whenever their contents change on disk -- no need to manage document state manually.
 
 ## Development
 
@@ -162,8 +162,11 @@ Files are opened in ZLS lazily on first access -- no need to manage document sta
 # build
 zig build
 
-# run tests (~75 unit tests)
+# run tests (162 unit tests, including a fake-ZLS harness)
 zig build test
+
+# quality gates: lint, coverage, dead code, mutants
+make lint cov deadcode mutants
 
 # run manually
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}' | \

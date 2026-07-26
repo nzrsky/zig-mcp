@@ -2,3 +2,4 @@
 zig-out/
 src/tags
 tags
+.coverage/

@@ -63,7 +63,7 @@ pub fn registerAll(reg: *registry.Registry) !void {
 
     try reg.register(handleDiagnostics, .{
         .name = "zig_diagnostics",
-        .description = "Get diagnostics (errors, warnings) for a Zig file by opening it in ZLS",
+        .description = "Get diagnostics (errors, warnings) for a Zig file from ZLS. Syncs the file first, so results reflect what is on disk right now.",
         .inputSchema = .{
             .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
@@ -216,21 +216,46 @@ fn getIntArg(args: std.json.Value, key: []const u8) ?i64 {
     return switch (args) {
         .object => |obj| if (obj.get(key)) |v| switch (v) {
             .integer => |i| i,
-            .float => |f| @intFromFloat(f),
+            // `@intFromFloat` is illegal behaviour outside the target range, so
+            // a client sending `{"line": 1e300}` (or a NaN) must not reach it.
+            .float => |f| floatToInt(f),
             else => null,
         } else null,
         else => null,
     };
 }
 
+fn floatToInt(f: f64) ?i64 {
+    if (!std.math.isFinite(f)) return null;
+    const limit: f64 = 9223372036854775808.0; // 2^63
+    if (f >= limit or f < -limit) return null;
+    return @intFromFloat(f);
+}
+
+/// A 0-based line/character argument. Negative positions are meaningless in
+/// LSP and would be sent on the wire as-is.
+fn getPositionArg(args: std.json.Value, key: []const u8) ?i64 {
+    const value = getIntArg(args, key) orelse return null;
+    return if (value < 0) null else value;
+}
+
+/// Longest prefix of `text` that fits in `max` bytes without splitting a UTF-8
+/// sequence — a split one would make the JSON response invalid.
+fn truncateUtf8(text: []const u8, max: usize) []const u8 {
+    if (text.len <= max) return text;
+    var end = max;
+    while (end > 0 and text[end] & 0xc0 == 0x80) end -= 1;
+    return text[0..end];
+}
+
 // ── LSP-backed tool handlers ──
 
 fn handleHover(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
-    const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
+    const line = getPositionArg(args, "line") orelse return ToolError.InvalidParams;
+    const char = getPositionArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const HoverParams = struct {
@@ -250,10 +275,10 @@ fn handleHover(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 
 fn handleDefinition(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
-    const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
+    const line = getPositionArg(args, "line") orelse return ToolError.InvalidParams;
+    const char = getPositionArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -272,10 +297,10 @@ fn handleDefinition(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
 
 fn handleReferences(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
-    const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
+    const line = getPositionArg(args, "line") orelse return ToolError.InvalidParams;
+    const char = getPositionArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -296,10 +321,10 @@ fn handleReferences(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
 
 fn handleCompletion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
-    const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
+    const line = getPositionArg(args, "line") orelse return ToolError.InvalidParams;
+    const char = getPositionArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -316,27 +341,91 @@ fn handleCompletion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     return formatCompletionResponse(ctx.allocator, response) catch return ToolError.LspError;
 }
 
+/// How long to wait for ZLS to push diagnostics after a document is synced.
+const diagnostics_timeout_ms: u32 = 3000;
+
 fn handleDiagnostics(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
 
-    // Opening the file triggers ZLS to compute diagnostics
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
-    defer ctx.allocator.free(file_uri);
+    // Syncing the document is what makes ZLS (re)compute diagnostics; a
+    // changed document also invalidates whatever was cached for that URI.
+    const synced = ctx.doc_state.sync(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
+    defer ctx.allocator.free(synced.uri);
 
-    // Give ZLS a moment to compute diagnostics, then request them via
-    // a dummy hover (ZLS sends diagnostics as notifications, but we
-    // can also just report "diagnostics sent, check your editor" or
-    // use a pull-based approach if ZLS supports it)
-    //
-    // For now, return a message that the file has been opened and diagnostics
-    // will appear via textDocument/publishDiagnostics notification
-    return ctx.allocator.dupe(u8, "File opened in ZLS. Diagnostics are sent asynchronously by ZLS. Use zig_check for synchronous syntax checking.") catch return ToolError.OutOfMemory;
+    // Diagnostics arrive as notifications, so there is nothing to request —
+    // the reader thread caches them and this waits for that to happen.
+    const raw = ctx.lsp_client.waitForDiagnostics(ctx.allocator, synced.uri, diagnostics_timeout_ms) catch
+        return ToolError.LspError;
+    const payload = raw orelse return ctx.allocator.dupe(
+        u8,
+        "ZLS reported no diagnostics for this file within the timeout.",
+    ) catch ToolError.OutOfMemory;
+    defer ctx.allocator.free(payload);
+
+    return formatDiagnostics(ctx.allocator, payload) catch return ToolError.LspError;
+}
+
+/// Render the cached `diagnostics` array as `line:col: severity: message`.
+fn formatDiagnostics(allocator: std.mem.Allocator, payload: []const u8) ![]const u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+
+    const items = switch (parsed.value) {
+        .array => |a| a,
+        else => return allocator.dupe(u8, "No diagnostics"),
+    };
+    if (items.items.len == 0) return allocator.dupe(u8, "No diagnostics: file is clean.");
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+
+    for (items.items) |item| {
+        const obj = switch (item) {
+            .object => |o| o,
+            else => continue,
+        };
+        const message = switch (obj.get("message") orelse .null) {
+            .string => |s| s,
+            else => continue,
+        };
+        const severity: ?u32 = switch (obj.get("severity") orelse .null) {
+            .integer => |i| if (i >= 0) @intCast(i) else null,
+            else => null,
+        };
+
+        var line: i64 = 0;
+        var character: i64 = 0;
+        if (obj.get("range")) |range| {
+            if (range == .object) {
+                if (range.object.get("start")) |start| {
+                    if (start == .object) {
+                        line = switch (start.object.get("line") orelse .null) {
+                            .integer => |i| i,
+                            else => 0,
+                        };
+                        character = switch (start.object.get("character") orelse .null) {
+                            .integer => |i| i,
+                            else => 0,
+                        };
+                    }
+                }
+            }
+        }
+
+        try aw.writer.print("{d}:{d}: {s}: {s}\n", .{
+            line + 1,
+            character + 1,
+            lsp_types.severityName(severity),
+            message,
+        });
+    }
+    return try aw.toOwnedSlice();
 }
 
 fn handleFormat(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -358,11 +447,11 @@ fn handleFormat(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 
 fn handleRename(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
-    const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
+    const line = getPositionArg(args, "line") orelse return ToolError.InvalidParams;
+    const char = getPositionArg(args, "character") orelse return ToolError.InvalidParams;
     const new_name = getStringArg(args, "new_name") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -384,7 +473,7 @@ fn handleRename(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 fn handleDocumentSymbols(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -414,28 +503,32 @@ fn handleWorkspaceSymbols(ctx: ToolContext, args: std.json.Value) ToolError![]co
     return formatWorkspaceSymbolsResponse(ctx.allocator, response) catch return ToolError.LspError;
 }
 
+/// Parameters for `textDocument/codeAction`.
+///
+/// `diagnostics` is a JSON array by contract. Declaring it as `[]const u8`
+/// serializes an empty slice as `""`, which ZLS rejects.
+const CodeActionParams = struct {
+    textDocument: struct { uri: []const u8 },
+    range: struct {
+        start: struct { line: i64, character: i64 },
+        end: struct { line: i64, character: i64 },
+    },
+    context: struct {
+        diagnostics: []const lsp_types.Diagnostic = &.{},
+    },
+};
+
 fn handleCodeAction(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const start_line = getIntArg(args, "start_line") orelse return ToolError.InvalidParams;
-    const start_char = getIntArg(args, "start_char") orelse return ToolError.InvalidParams;
-    const end_line = getIntArg(args, "end_line") orelse return ToolError.InvalidParams;
-    const end_char = getIntArg(args, "end_char") orelse return ToolError.InvalidParams;
+    const start_line = getPositionArg(args, "start_line") orelse return ToolError.InvalidParams;
+    const start_char = getPositionArg(args, "start_char") orelse return ToolError.InvalidParams;
+    const end_line = getPositionArg(args, "end_line") orelse return ToolError.InvalidParams;
+    const end_char = getPositionArg(args, "end_char") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
     defer ctx.allocator.free(file_uri);
 
-    const Params = struct {
-        textDocument: struct { uri: []const u8 },
-        range: struct {
-            start: struct { line: i64, character: i64 },
-            end: struct { line: i64, character: i64 },
-        },
-        context: struct {
-            diagnostics: []const u8 = &.{},
-        },
-    };
-
-    const response = ctx.lsp_client.sendRequest(ctx.allocator, "textDocument/codeAction", Params{
+    const response = ctx.lsp_client.sendRequest(ctx.allocator, "textDocument/codeAction", CodeActionParams{
         .textDocument = .{ .uri = file_uri },
         .range = .{
             .start = .{ .line = start_line, .character = start_char },
@@ -450,10 +543,10 @@ fn handleCodeAction(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
 
 fn handleSignatureHelp(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const line = getIntArg(args, "line") orelse return ToolError.InvalidParams;
-    const char = getIntArg(args, "character") orelse return ToolError.InvalidParams;
+    const line = getPositionArg(args, "line") orelse return ToolError.InvalidParams;
+    const char = getPositionArg(args, "character") orelse return ToolError.InvalidParams;
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch return ToolError.FileNotFound;
+    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
     defer ctx.allocator.free(file_uri);
 
     const Params = struct {
@@ -507,16 +600,20 @@ fn handleCheck(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
 
 fn handleVersion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     _ = args;
-    const zig_ver = runZigCommand(ctx.allocator, ctx.io, ctx.workspace.root_path, "version", null) catch "unknown";
-    defer if (!std.mem.eql(u8, zig_ver, "unknown")) ctx.allocator.free(zig_ver);
+    // Ownership is tracked by the optional, not by comparing the text against
+    // a sentinel — a command that really printed "unknown" used to leak (or,
+    // worse, hand a string literal to `free`).
+    const zig_ver: ?[]const u8 = runZigCommand(ctx.allocator, ctx.io, ctx.workspace.root_path, "version", null) catch null;
+    defer if (zig_ver) |v| ctx.allocator.free(v);
 
-    const zls_ver = runCommandSlice(ctx.allocator, ctx.io, &.{ "zls", "--version" }, ctx.workspace.root_path) catch "unknown";
-    defer if (!std.mem.eql(u8, zls_ver, "unknown")) ctx.allocator.free(zls_ver);
+    const zls_ver: ?[]const u8 = runCommandSlice(ctx.allocator, ctx.io, &.{ "zls", "--version" }, ctx.workspace.root_path) catch null;
+    defer if (zls_ver) |v| ctx.allocator.free(v);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    errdefer aw.deinit();
     aw.writer.print("Zig: {s}\nZLS: {s}", .{
-        std.mem.trimEnd(u8, zig_ver, "\n\r "),
-        std.mem.trimEnd(u8, zls_ver, "\n\r "),
+        std.mem.trimEnd(u8, zig_ver orelse "unknown", "\n\r "),
+        std.mem.trimEnd(u8, zls_ver orelse "unknown", "\n\r "),
     }) catch return ToolError.OutOfMemory;
     return aw.toOwnedSlice() catch return ToolError.OutOfMemory;
 }
@@ -734,7 +831,7 @@ fn formatTextEditsResponse(allocator: std.mem.Allocator, response: []const u8) !
         if (edit_obj.get("newText")) |new_text| {
             if (new_text == .string) {
                 const text = new_text.string;
-                const preview = if (text.len > 80) text[0..80] else text;
+                const preview = truncateUtf8(text, 80);
                 try aw.writer.print("  Edit {d}: \"{s}\"\n", .{ i + 1, preview });
             }
         }
@@ -1068,6 +1165,18 @@ fn lspToToolError(err: anytype) ToolError {
     };
 }
 
+/// Map a document-sync failure. Reporting everything as `FileNotFound` (the
+/// old behaviour) hid `NotConnected`, which is what drives the ZLS reconnect.
+fn docToToolError(err: anytype) ToolError {
+    return switch (err) {
+        error.FileNotFound => ToolError.FileNotFound,
+        error.FileReadError => ToolError.FileReadError,
+        error.NotConnected => ToolError.NotConnected,
+        error.OutOfMemory => ToolError.OutOfMemory,
+        else => ToolError.LspError,
+    };
+}
+
 // ── Tests ──
 
 test "getStringArg extracts string from JSON object" {
@@ -1251,3 +1360,362 @@ test "formatWorkspaceEditResponse with changes" {
     try std.testing.expect(std.mem.indexOf(u8, result, "/src/main.zig") != null);
 }
 
+
+test "getIntArg rejects out-of-range and non-finite floats" {
+    const alloc = std.testing.allocator;
+    // `@intFromFloat` on any of these is illegal behaviour, so they must be
+    // rejected before the conversion — a client could otherwise crash the
+    // server with one message.
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc,
+        \\{"huge":1e300,"tiny":-1e300,"ok":7.0}
+    , .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(getIntArg(parsed.value, "huge") == null);
+    try std.testing.expect(getIntArg(parsed.value, "tiny") == null);
+    try std.testing.expectEqual(@as(i64, 7), getIntArg(parsed.value, "ok").?);
+}
+
+test "floatToInt boundaries" {
+    try std.testing.expectEqual(@as(i64, 0), floatToInt(0.0).?);
+    try std.testing.expectEqual(@as(i64, -1), floatToInt(-1.5).?);
+    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), floatToInt(-9223372036854775808.0).?);
+    try std.testing.expect(floatToInt(9223372036854775808.0) == null);
+    try std.testing.expect(floatToInt(std.math.inf(f64)) == null);
+    try std.testing.expect(floatToInt(std.math.nan(f64)) == null);
+}
+
+test "getPositionArg rejects negative positions" {
+    const alloc = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc,
+        \\{"line":-1,"character":0}
+    , .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(getPositionArg(parsed.value, "line") == null);
+    try std.testing.expectEqual(@as(i64, 0), getPositionArg(parsed.value, "character").?);
+}
+
+test "truncateUtf8 never splits a codepoint" {
+    try std.testing.expectEqualStrings("abc", truncateUtf8("abc", 10));
+    try std.testing.expectEqualStrings("ab", truncateUtf8("abc", 2));
+    // "é" is two bytes: cutting at 1 must drop it entirely.
+    try std.testing.expectEqualStrings("a", truncateUtf8("aé", 2));
+    try std.testing.expectEqualStrings("aé", truncateUtf8("aé", 3));
+    // Four-byte codepoint at every possible cut point.
+    const emoji = "x🙂";
+    for (0..emoji.len + 1) |max| {
+        const cut = truncateUtf8(emoji, max);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(cut));
+    }
+}
+
+test "codeAction params serialize diagnostics as an array" {
+    const alloc = std.testing.allocator;
+    const params = CodeActionParams{
+        .textDocument = .{ .uri = "file:///a.zig" },
+        .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 1 } },
+        .context = .{},
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    try jw.write(params);
+
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\"diagnostics\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\"diagnostics\":\"\"") == null);
+}
+
+test "formatDiagnostics renders one line per diagnostic" {
+    const alloc = std.testing.allocator;
+    const payload =
+        \\[{"range":{"start":{"line":9,"character":4},"end":{"line":9,"character":8}},"severity":1,"message":"expected ';'"},
+        \\ {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":2,"message":"unused variable"}]
+    ;
+    const out = try formatDiagnostics(alloc, payload);
+    defer alloc.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "10:5: Error: expected ';'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "1:1: Warning: unused variable") != null);
+}
+
+test "formatDiagnostics on an empty array reports a clean file" {
+    const alloc = std.testing.allocator;
+    const out = try formatDiagnostics(alloc, "[]");
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("No diagnostics: file is clean.", out);
+}
+
+test "formatDiagnostics tolerates malformed entries" {
+    const alloc = std.testing.allocator;
+    const out = try formatDiagnostics(alloc,
+        \\[1,"two",{"message":"kept"},{"no_message":true}]
+    );
+    defer alloc.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "kept") != null);
+}
+
+test "registerAll registers every tool exactly once" {
+    const alloc = std.testing.allocator;
+    var reg = registry.Registry.init(alloc);
+    defer reg.deinit();
+
+    try registerAll(&reg);
+    try std.testing.expectEqual(@as(u32, 16), reg.entries.count());
+    try std.testing.expect(reg.getHandler("zig_hover") != null);
+    try std.testing.expect(reg.getHandler("zig_diagnostics") != null);
+
+    // Every schema must be an object: MCP clients discard tools whose
+    // `properties` is null.
+    var it = reg.entries.iterator();
+    while (it.next()) |entry| {
+        try std.testing.expect(entry.value_ptr.definition.inputSchema.properties == .object);
+    }
+}
+
+test "registerAll survives allocation failure without leaking" {
+    const alloc = std.testing.allocator;
+    var i: usize = 0;
+    while (i < 128) : (i += 1) {
+        var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = i });
+        var reg = registry.Registry.init(failing.allocator());
+        defer reg.deinit();
+        registerAll(&reg) catch {};
+    }
+}
+
+// ── End-to-end tool tests ──
+//
+// These drive a real `LspClient` against a fake ZLS, so they cover the whole
+// path a tool call takes: document sync, request serialization, and response
+// formatting. Everything below the fake is the production code.
+
+const test_zls = @import("../test_zls.zig");
+const DocumentState = @import("../state/documents.zig").DocumentState;
+const Workspace = @import("../state/workspace.zig").Workspace;
+const test_util = @import("../testing.zig");
+
+const ToolFixture = struct {
+    fake: test_zls.FakeZls,
+    ws: test_util.TmpWorkspace,
+    workspace: Workspace,
+    docs: DocumentState,
+    alloc: std.mem.Allocator,
+
+    fn init(alloc: std.mem.Allocator) !ToolFixture {
+        var ws = try test_util.TmpWorkspace.init(alloc);
+        errdefer ws.deinit();
+        return .{
+            .fake = try test_zls.FakeZls.init(alloc),
+            .ws = ws,
+            .workspace = try Workspace.init(alloc, ws.root),
+            // SAFETY: assigned by `start`, which borrows `workspace.root_path`
+            // and so needs this struct to be at its final address.
+            .docs = undefined,
+            .alloc = alloc,
+        };
+    }
+
+    fn start(self: *ToolFixture) !void {
+        try self.fake.start();
+        self.docs = DocumentState.init(self.alloc, self.workspace.root_path, test_util.io());
+    }
+
+    fn ctx(self: *ToolFixture, allocator: std.mem.Allocator) ToolContext {
+        return .{
+            .lsp_client = &self.fake.client,
+            .doc_state = &self.docs,
+            .workspace = &self.workspace,
+            .allocator = allocator,
+            .io = test_util.io(),
+        };
+    }
+
+    fn deinit(self: *ToolFixture) void {
+        self.docs.deinit();
+        self.fake.deinit();
+        self.workspace.deinit();
+        self.ws.deinit();
+    }
+};
+
+/// Build `{"file": ..., "line": ..., "character": ...}` for a handler call.
+fn positionArgs(arena: std.mem.Allocator, file: []const u8, line: i64, character: i64) !std.json.Value {
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(arena, "file", .{ .string = file });
+    try obj.put(arena, "line", .{ .integer = line });
+    try obj.put(arena, "character", .{ .integer = character });
+    return .{ .object = obj };
+}
+
+/// Drain the didOpen/didChange notification the document sync emits, then
+/// answer the request that follows.
+fn serveOne(fake: *test_zls.FakeZls, alloc: std.mem.Allocator, result: []const u8) !void {
+    while (true) {
+        const msg = (try fake.nextRequest(alloc)) orelse return error.NoRequest;
+        defer alloc.free(msg);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, msg, .{});
+        defer parsed.deinit();
+        const id = parsed.value.object.get("id") orelse continue; // notification
+        const reply = try std.fmt.allocPrint(
+            alloc,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{s}}}",
+            .{ id.integer, result },
+        );
+        defer alloc.free(reply);
+        try fake.reply(reply);
+        return;
+    }
+}
+
+test "zig_hover syncs the document and formats the hover" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("a.zig", "const a = 1;");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const args = try positionArgs(arena.allocator(), "a.zig", 0, 6);
+
+    const server = try std.Thread.spawn(.{}, serveOne, .{
+        &fx.fake, alloc,
+        \\{"contents":{"kind":"markdown","value":"const a: comptime_int"}}
+    });
+    defer server.join();
+
+    const out = try handleHover(fx.ctx(arena.allocator()), args);
+    try std.testing.expectEqualStrings("const a: comptime_int", out);
+}
+
+test "an edited file is resynced before the next request" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("a.zig", "const a = 1;");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const args = try positionArgs(arena.allocator(), "a.zig", 0, 6);
+
+    const first = try std.Thread.spawn(.{}, serveOne, .{ &fx.fake, alloc, "{\"contents\":\"one\"}" });
+    const out1 = try handleHover(fx.ctx(arena.allocator()), args);
+    first.join();
+    try std.testing.expectEqualStrings("one", out1);
+
+    // The file changes on disk. Without a didChange, ZLS would keep answering
+    // from the original text — the bug this guards.
+    try fx.ws.writeFile("a.zig", "const a = 2222;");
+
+    const second = try std.Thread.spawn(.{}, serveOne, .{ &fx.fake, alloc, "{\"contents\":\"two\"}" });
+    const out2 = try handleHover(fx.ctx(arena.allocator()), args);
+    second.join();
+    try std.testing.expectEqualStrings("two", out2);
+
+    // Version 2 means exactly one didChange was sent for the one edit.
+    const uri = try fx.workspace.fileUri(alloc, "a.zig");
+    defer alloc.free(uri);
+    try std.testing.expectEqual(@as(i64, 2), fx.docs.open_docs.get(uri).?.version);
+}
+
+test "zig_code_action sends diagnostics as an array on the wire" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("a.zig", "const a = 1;");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(arena.allocator(), "file", .{ .string = "a.zig" });
+    for ([_][]const u8{ "start_line", "start_char", "end_line", "end_char" }) |key| {
+        try obj.put(arena.allocator(), key, .{ .integer = 0 });
+    }
+
+    const Capture = struct {
+        fn run(fake: *test_zls.FakeZls, a: std.mem.Allocator, out: *[]const u8) !void {
+            while (true) {
+                const msg = (try fake.nextRequest(a)) orelse return error.NoRequest;
+                const parsed = try std.json.parseFromSlice(std.json.Value, a, msg, .{});
+                defer parsed.deinit();
+                if (parsed.value.object.get("id")) |id| {
+                    out.* = msg;
+                    const reply = try std.fmt.allocPrint(a, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[]}}", .{id.integer});
+                    defer a.free(reply);
+                    try fake.reply(reply);
+                    return;
+                }
+                a.free(msg);
+            }
+        }
+    };
+    var request: []const u8 = "";
+    const server = try std.Thread.spawn(.{}, Capture.run, .{ &fx.fake, alloc, &request });
+
+    const out = try handleCodeAction(fx.ctx(arena.allocator()), .{ .object = obj });
+    server.join();
+    defer alloc.free(request);
+
+    try std.testing.expectEqualStrings("No code actions available", out);
+    try std.testing.expect(std.mem.indexOf(u8, request, "\"diagnostics\":[]") != null);
+}
+
+test "zig_diagnostics returns what ZLS published" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("a.zig", "const a = ;");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(arena.allocator(), "file", .{ .string = "a.zig" });
+
+    const uri = try fx.workspace.fileUri(alloc, "a.zig");
+    defer alloc.free(uri);
+
+    const Publisher = struct {
+        fn run(fake: *test_zls.FakeZls, a: std.mem.Allocator, doc_uri: []const u8) !void {
+            // Wait for the didOpen, then push diagnostics like ZLS would.
+            const msg = (try fake.nextRequest(a)) orelse return error.NoRequest;
+            defer a.free(msg);
+            const note = try std.fmt.allocPrint(a,
+                \\{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"{s}","diagnostics":[{{"range":{{"start":{{"line":0,"character":10}},"end":{{"line":0,"character":11}}}},"severity":1,"message":"expected expression"}}]}}}}
+            , .{doc_uri});
+            defer a.free(note);
+            try fake.reply(note);
+        }
+    };
+    const publisher = try std.Thread.spawn(.{}, Publisher.run, .{ &fx.fake, alloc, uri });
+    defer publisher.join();
+
+    const out = try handleDiagnostics(fx.ctx(arena.allocator()), .{ .object = obj });
+    try std.testing.expectEqualStrings("1:11: Error: expected expression\n", out);
+}
+
+test "a tool reports NotConnected once ZLS is gone" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("a.zig", "const a = 1;");
+
+    fx.fake.kill();
+    while (fx.fake.client.isConnected()) {
+        test_util.io().sleep(.fromMilliseconds(5), .awake) catch break;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const args = try positionArgs(arena.allocator(), "a.zig", 0, 6);
+
+    // Must be NotConnected, not FileNotFound: the server keys its reconnect
+    // attempt off this error.
+    try std.testing.expectError(ToolError.NotConnected, handleHover(fx.ctx(arena.allocator()), args));
+}
