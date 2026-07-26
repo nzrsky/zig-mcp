@@ -117,31 +117,30 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 
 ## Tools
 
-### Code intelligence (via ZLS)
+All of these answer from ZLS's semantic model — the part a shell and a text
+search cannot reach.
 
-| Tool | What it does |
+| Tool | What it knows that grep does not |
 |------|-------------|
-| `zig_hover` | Type info and docs for a symbol |
-| `zig_definition` | Go to definition |
-| `zig_references` | Find all references |
-| `zig_completion` | Completion suggestions |
-| `zig_diagnostics` | Errors and warnings for a file |
-| `zig_format` | Format a file |
-| `zig_rename` | Rename a symbol across the workspace |
-| `zig_document_symbols` | List all symbols in a file |
-| `zig_workspace_symbols` | Search symbols across the project |
-| `zig_code_action` | Quick fixes and refactors for a range |
-| `zig_signature_help` | Function signature at cursor |
+| `zig_definition` | The one true declaration, followed through imports and aliases. Takes `symbol` or `file`+`line`+`character` |
+| `zig_references` | Real usages, scope-aware; skips same-named identifiers, comments and strings. `symbol` mode also searches through re-exports |
+| `zig_hover` | The type after comptime evaluation and inference — invisible in the source text |
+| `zig_diagnostics` | Errors for one file without building the project, re-synced against disk first |
+| `zig_workspace_symbols` | Declarations by name, not every line mentioning it |
+| `zig_document_symbols` | A file's outline: declarations, kinds, nesting |
+| `zig_completion` | What can legally follow at a position, with types |
+| `zig_signature_help` | The real signature, comptime and generic parameters included |
+| `zig_rename` | Which files a rename touches, scope-aware |
+| `zig_code_action` | Quick fixes ZLS offers for a range |
 
-### Build & run
+### What is deliberately absent
 
-| Tool | What it does |
-|------|-------------|
-| `zig_build` | Run `zig build` with optional args |
-| `zig_test` | Run tests (whole project or single file, with optional filter) |
-| `zig_check` | Run `zig ast-check` on a file |
-| `zig_version` | Show Zig and ZLS versions |
-| `zig_manage` | Manage Zig versions via [zvm](https://github.com/marler/zvm) |
+There is no `zig_build`, `zig_test`, `zig_format` or `zig_version`. They used to
+exist and wrapped `zig build`, `zig test`, `zig fmt` and `zig version` — and a
+wrapper loses to the shell it wraps: no pipes, no redirection, no working
+directory of its own. Session transcripts settle it: 526 `zig build`
+invocations through the shell, zero calls to the tool. Run those with your
+shell.
 
 ## How it works
 

@@ -18,6 +18,7 @@ pub const ToolHandler = *const fn (ctx: ToolContext, args: std.json.Value) ToolE
 
 pub const ToolError = error{
     InvalidParams,
+    SymbolNotFound,
     LspError,
     NotConnected,
     RequestTimeout,

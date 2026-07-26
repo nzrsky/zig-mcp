@@ -19,7 +19,7 @@ pub const State = enum {
 };
 
 pub const protocol_version = "2024-11-05";
-pub const server_version = "0.2.1";
+pub const server_version = "0.2.2";
 
 pub const McpServer = struct {
     state: State = .uninitialized,
@@ -290,6 +290,7 @@ pub const McpServer = struct {
     fn writeToolError(self: *McpServer, allocator: std.mem.Allocator, id: json_rpc.RequestId, err: ToolError) !void {
         const err_msg = switch (err) {
             error.InvalidParams => "Invalid parameters",
+            error.SymbolNotFound => "No such symbol in the workspace index",
             error.LspError => "LSP error",
             error.NotConnected => "ZLS not connected",
             error.RequestTimeout => "Request timed out",

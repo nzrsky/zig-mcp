@@ -9,61 +9,52 @@ const ToolError = registry.ToolError;
 
 /// Register all tools into the registry.
 pub fn registerAll(reg: *registry.Registry) !void {
-    try reg.register(handleHover, .{
-        .name = "zig_hover",
-        .description = "Get hover information (type info, documentation) for a symbol at a given position in a Zig file",
-        .inputSchema = .{
-            .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "file", "string", "Path to the Zig source file (relative to workspace or absolute)" },
-                .{ "line", "integer", "0-based line number" },
-                .{ "character", "integer", "0-based character offset" },
-            }),
-            .required = &.{ "file", "line", "character" },
-        },
-    });
+    // Descriptions say what the tool knows that the alternatives do not.
+    // A caller with a shell and a grep will not reach for a tool whose
+    // description only restates its name.
 
     try reg.register(handleDefinition, .{
         .name = "zig_definition",
-        .description = "Go to definition of a symbol at a given position in a Zig file",
+        .description = "Jump to where a Zig symbol is declared. Pass `symbol` for a name lookup, or `file`+`line`+`character` for a cursor position. Resolved by the compiler's semantic model, so it follows imports, aliases and `@import` chains and lands on the one true declaration — unlike a text search, which returns every mention of the name.",
         .inputSchema = .{
             .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "file", "string", "Path to the Zig source file" },
+                .{ "symbol", "string", "Symbol name, e.g. \"PosixMutex\" or \"LspClient.sendRequest\". Use this when you know the name but not the position." },
+                .{ "file", "string", "Path to the Zig source file (only with line and character)" },
                 .{ "line", "integer", "0-based line number" },
                 .{ "character", "integer", "0-based character offset" },
             }),
-            .required = &.{ "file", "line", "character" },
         },
     });
 
     try reg.register(handleReferences, .{
         .name = "zig_references",
-        .description = "Find all references to a symbol at a given position",
+        .description = "Find every use of a Zig symbol across the workspace. Pass `symbol` for a name lookup, or `file`+`line`+`character`. Finds usages reached through imports and aliases, and skips same-named identifiers in other scopes, comments and strings — which is exactly where grep gives both false hits and misses.",
         .inputSchema = .{
             .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "file", "string", "Path to the Zig source file" },
+                .{ "symbol", "string", "Symbol name to find usages of" },
+                .{ "file", "string", "Path to the Zig source file (only with line and character)" },
                 .{ "line", "integer", "0-based line number" },
                 .{ "character", "integer", "0-based character offset" },
             }),
-            .required = &.{ "file", "line", "character" },
         },
     });
 
-    try reg.register(handleCompletion, .{
-        .name = "zig_completion",
-        .description = "Get completion suggestions at a given position in a Zig file",
+    try reg.register(handleHover, .{
+        .name = "zig_hover",
+        .description = "Resolved type and doc comment for a Zig symbol. Pass `symbol` or `file`+`line`+`character`. Shows the type after comptime evaluation and inference — what the compiler concluded, which is not visible in the source text (`var x = foo()` tells you nothing on its own).",
         .inputSchema = .{
             .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "file", "string", "Path to the Zig source file" },
+                .{ "symbol", "string", "Symbol name to inspect" },
+                .{ "file", "string", "Path to the Zig source file (only with line and character)" },
                 .{ "line", "integer", "0-based line number" },
                 .{ "character", "integer", "0-based character offset" },
             }),
-            .required = &.{ "file", "line", "character" },
         },
     });
 
     try reg.register(handleDiagnostics, .{
         .name = "zig_diagnostics",
-        .description = "Get diagnostics (errors, warnings) for a Zig file from ZLS. Syncs the file first, so results reflect what is on disk right now.",
+        .description = "Errors and warnings for one Zig file, straight from ZLS. Re-syncs the file first, so results match what is on disk right now. Answers for a single file without building the project — faster than `zig build` when you only touched one file, and it works even when an unrelated part of the tree does not compile.",
         .inputSchema = .{
             .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
@@ -72,20 +63,57 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register(handleFormat, .{
-        .name = "zig_format",
-        .description = "Format a Zig source file using ZLS",
+    try reg.register(handleWorkspaceSymbols, .{
+        .name = "zig_workspace_symbols",
+        .description = "Search declarations across the workspace by name. Returns declarations only, with their kind (function, struct, constant...) — a name search over the symbol index rather than over the file text, so call sites and comments do not drown the result.",
+        .inputSchema = .{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
+                .{ "query", "string", "Search query for symbol names" },
+            }),
+            .required = &.{"query"},
+        },
+    });
+
+    try reg.register(handleDocumentSymbols, .{
+        .name = "zig_document_symbols",
+        .description = "Outline of one Zig file: every declaration with its kind, nesting and line number. Cheaper than reading the file when you only need its shape.",
         .inputSchema = .{
             .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
             }),
             .required = &.{"file"},
+        },
+    });
+
+    try reg.register(handleCompletion, .{
+        .name = "zig_completion",
+        .description = "What can legally follow at a given position: fields, methods and declarations in scope, with their types. Use it to discover an API instead of guessing at member names.",
+        .inputSchema = .{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
+                .{ "file", "string", "Path to the Zig source file" },
+                .{ "line", "integer", "0-based line number" },
+                .{ "character", "integer", "0-based character offset" },
+            }),
+            .required = &.{ "file", "line", "character" },
+        },
+    });
+
+    try reg.register(handleSignatureHelp, .{
+        .name = "zig_signature_help",
+        .description = "Parameter list and types of the function being called at a position — the real signature, including comptime and generic parameters.",
+        .inputSchema = .{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
+                .{ "file", "string", "Path to the Zig source file" },
+                .{ "line", "integer", "0-based line number" },
+                .{ "character", "integer", "0-based character offset" },
+            }),
+            .required = &.{ "file", "line", "character" },
         },
     });
 
     try reg.register(handleRename, .{
         .name = "zig_rename",
-        .description = "Rename a symbol at a given position across the workspace",
+        .description = "Preview a workspace-wide rename of a symbol: which files change and how many edits each takes. Scope-aware, so it will not touch a same-named identifier elsewhere the way a search-and-replace would.",
         .inputSchema = .{
             .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
@@ -97,31 +125,9 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register(handleDocumentSymbols, .{
-        .name = "zig_document_symbols",
-        .description = "List all symbols (functions, types, variables) defined in a Zig file",
-        .inputSchema = .{
-            .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "file", "string", "Path to the Zig source file" },
-            }),
-            .required = &.{"file"},
-        },
-    });
-
-    try reg.register(handleWorkspaceSymbols, .{
-        .name = "zig_workspace_symbols",
-        .description = "Search for symbols across the workspace",
-        .inputSchema = .{
-            .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "query", "string", "Search query for symbol names" },
-            }),
-            .required = &.{"query"},
-        },
-    });
-
     try reg.register(handleCodeAction, .{
         .name = "zig_code_action",
-        .description = "Get available code actions (quick fixes, refactors) for a range in a Zig file",
+        .description = "Quick fixes and refactors ZLS offers for a range — discard-unused, add missing discard, organize imports and the like.",
         .inputSchema = .{
             .properties = try mcp_types.makeProperty(reg.allocator, &.{
                 .{ "file", "string", "Path to the Zig source file" },
@@ -134,70 +140,12 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    try reg.register(handleSignatureHelp, .{
-        .name = "zig_signature_help",
-        .description = "Get function signature help at a given position",
-        .inputSchema = .{
-            .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "file", "string", "Path to the Zig source file" },
-                .{ "line", "integer", "0-based line number" },
-                .{ "character", "integer", "0-based character offset" },
-            }),
-            .required = &.{ "file", "line", "character" },
-        },
-    });
-
-    try reg.register(handleBuild, .{
-        .name = "zig_build",
-        .description = "Run `zig build` in the workspace. Returns build output (errors, warnings).",
-        .inputSchema = .{
-            .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "args", "string", "Additional arguments to pass to zig build (space-separated)" },
-            }),
-        },
-    });
-
-    try reg.register(handleTest, .{
-        .name = "zig_test",
-        .description = "Run Zig tests. If file is specified, runs tests for that file. Otherwise runs `zig build test`.",
-        .inputSchema = .{
-            .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "file", "string", "Optional: specific file to test" },
-                .{ "filter", "string", "Optional: test name filter" },
-            }),
-        },
-    });
-
-    try reg.register(handleCheck, .{
-        .name = "zig_check",
-        .description = "Run `zig ast-check` on a Zig source file to check for syntax errors",
-        .inputSchema = .{
-            .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "file", "string", "Path to the Zig source file to check" },
-            }),
-            .required = &.{"file"},
-        },
-    });
-
-    try reg.register(handleVersion, .{
-        .name = "zig_version",
-        .description = "Get Zig and ZLS version information",
-        .inputSchema = .{
-            .properties = .{ .object = @as(std.json.ObjectMap, .empty) },
-        },
-    });
-
-    try reg.register(handleManage, .{
-        .name = "zig_manage",
-        .description = "Manage Zig versions using zvm (Zig Version Manager)",
-        .inputSchema = .{
-            .properties = try mcp_types.makeProperty(reg.allocator, &.{
-                .{ "action", "string", "Action: 'list', 'install', or 'use'" },
-                .{ "version", "string", "Version string (required for install/use)" },
-            }),
-            .required = &.{"action"},
-        },
-    });
+    // Deliberately not registered: zig_build, zig_test, zig_format and
+    // zig_version. They wrapped `zig build`, `zig test`, `zig fmt` and
+    // `zig version`, and a wrapper loses to the shell it wraps — no pipes, no
+    // redirection, no working directory of its own. Session transcripts bear
+    // this out: 526 `zig build` invocations through the shell against zero
+    // calls to the tool. What is left here is what a shell cannot do.
 }
 
 // ── Helper: extract arguments ──
@@ -248,15 +196,273 @@ fn truncateUtf8(text: []const u8, max: usize) []const u8 {
     return text[0..end];
 }
 
+// ── Symbol resolution ──
+//
+// Every position-based LSP request needs a line and a character offset. A
+// caller that is reasoning about code has a *name*, not a cursor, and getting
+// coordinates means reading the file first — which is the work the tool was
+// supposed to save. So each of these tools also accepts `symbol` and resolves
+// the position itself through `workspace/symbol`.
+
+/// A symbol location resolved out of a `workspace/symbol` reply.
+const ResolvedSymbol = struct {
+    /// Document URI, allocated with the context allocator.
+    uri: []const u8,
+    line: i64,
+    character: i64,
+    name: []const u8,
+    kind: u32,
+    /// Lines the declaration spans. A re-export (`const X = @import(..).X;`)
+    /// is one line; the declaration it points at is not. Ranking by this
+    /// keeps a symbol query from landing on an alias.
+    span: i64 = 0,
+};
+
+/// Directories that never hold source worth searching.
+fn isSkippedDir(name: []const u8) bool {
+    return std.mem.eql(u8, name, ".git") or
+        std.mem.eql(u8, name, ".zig-cache") or
+        std.mem.eql(u8, name, "zig-cache") or
+        std.mem.eql(u8, name, "zig-out") or
+        std.mem.eql(u8, name, ".coverage");
+}
+
+/// Upper bounds so a huge tree cannot turn one tool call into a full scan.
+const max_scanned_files: usize = 4096;
+const max_candidate_files: usize = 32;
+
+/// Find where `query` is declared.
+///
+/// ZLS advertises `workspaceSymbolProvider` but answers `[]` for every query,
+/// so the index cannot be used. Instead: shortlist files whose text contains
+/// the name (cheap, no LSP traffic), then ask ZLS for each candidate's
+/// document symbols and match exactly. The shortlist is textual, but the match
+/// is semantic — a mention in a comment or a call site never wins, because
+/// only declarations appear in a document symbol tree.
+fn resolveSymbol(ctx: ToolContext, query: []const u8) ToolError!ResolvedSymbol {
+    const all = try resolveSymbolAll(ctx, query);
+    return all[0];
+}
+
+/// Every declaration of `query`, widest first.
+///
+/// More than one is normal in Zig: `const X = @import("x.zig").X;` is its own
+/// declaration, and ZLS reports references against whichever one is under the
+/// cursor. Callers that want the whole picture ask at each of them.
+fn resolveSymbolAll(ctx: ToolContext, query: []const u8) ToolError![]ResolvedSymbol {
+    if (query.len == 0) return ToolError.InvalidParams;
+
+    var dir = std.Io.Dir.cwd().openDir(ctx.io, ctx.workspace.root_path, .{ .iterate = true }) catch
+        return ToolError.FileReadError;
+    defer dir.close(ctx.io);
+
+    var walker = dir.walk(ctx.allocator) catch return ToolError.OutOfMemory;
+    defer walker.deinit();
+
+    var candidates: std.ArrayList([]const u8) = .empty;
+    defer candidates.deinit(ctx.allocator);
+
+    var scanned: usize = 0;
+    while (walker.next(ctx.io) catch null) |entry| {
+        if (scanned >= max_scanned_files or candidates.items.len >= max_candidate_files) break;
+        if (entry.kind == .directory) {
+            if (isSkippedDir(entry.basename)) walker.leave(ctx.io);
+            continue;
+        }
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        scanned += 1;
+
+        const contents = dir.readFileAlloc(ctx.io, entry.path, ctx.allocator, std.Io.Limit.limited(max_source_bytes)) catch continue;
+        defer ctx.allocator.free(contents);
+        if (std.mem.indexOf(u8, contents, query) == null) continue;
+
+        const owned = ctx.allocator.dupe(u8, entry.path) catch return ToolError.OutOfMemory;
+        candidates.append(ctx.allocator, owned) catch return ToolError.OutOfMemory;
+    }
+
+    var matches: std.ArrayList(ResolvedSymbol) = .empty;
+    errdefer matches.deinit(ctx.allocator);
+
+    for (candidates.items) |rel_path| {
+        const uri = ctx.doc_state.ensureOpen(ctx.lsp_client, rel_path, ctx.allocator) catch continue;
+        defer ctx.allocator.free(uri);
+
+        const Params = struct { textDocument: struct { uri: []const u8 } };
+        const response = ctx.lsp_client.sendRequest(ctx.allocator, "textDocument/documentSymbol", Params{
+            .textDocument = .{ .uri = uri },
+        }) catch |err| return lspToToolError(err);
+        defer ctx.allocator.free(response);
+
+        const found = (try findSymbolInResponse(ctx, response, uri, query)) orelse continue;
+        matches.append(ctx.allocator, found) catch return ToolError.OutOfMemory;
+        // No early exit: every candidate is opened on purpose. ZLS computes
+        // references only across documents it holds, so stopping at the first
+        // match would make `zig_references` silently miss the other files.
+    }
+
+    if (matches.items.len == 0) return ToolError.SymbolNotFound;
+    std.mem.sort(ResolvedSymbol, matches.items, {}, struct {
+        fn widestFirst(_: void, a: ResolvedSymbol, b: ResolvedSymbol) bool {
+            return a.span > b.span;
+        }
+    }.widestFirst);
+    return matches.toOwnedSlice(ctx.allocator) catch ToolError.OutOfMemory;
+}
+
+const max_source_bytes: usize = 4 * 1024 * 1024;
+
+fn findSymbolInResponse(
+    ctx: ToolContext,
+    response: []const u8,
+    uri: []const u8,
+    query: []const u8,
+) ToolError!?ResolvedSymbol {
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, response, .{}) catch
+        return ToolError.LspError;
+    defer parsed.deinit();
+
+    const items = switch (parsed.value) {
+        .object => |o| switch (o.get("result") orelse .null) {
+            .array => |a| a,
+            else => return null,
+        },
+        else => return null,
+    };
+    return searchSymbolTree(ctx, items, uri, query);
+}
+
+/// Depth-first search for an exact name match, nested declarations included.
+fn searchSymbolTree(
+    ctx: ToolContext,
+    items: std.json.Array,
+    uri: []const u8,
+    query: []const u8,
+) ToolError!?ResolvedSymbol {
+    var best: ?ResolvedSymbol = null;
+    for (items.items) |item| {
+        const obj = switch (item) {
+            .object => |o| o,
+            else => continue,
+        };
+        const name = switch (obj.get("name") orelse .null) {
+            .string => |n| n,
+            else => "",
+        };
+
+        if (std.mem.eql(u8, name, query)) {
+            const full = obj.get("range") orelse .null;
+            // `selectionRange` covers the identifier itself; `range` covers the
+            // whole declaration and would point at `pub`, where ZLS has nothing
+            // to say.
+            const range = obj.get("selectionRange") orelse obj.get("range") orelse .null;
+            const start = switch (range) {
+                .object => |r| switch (r.get("start") orelse .null) {
+                    .object => |st| st,
+                    else => continue,
+                },
+                else => continue,
+            };
+            const found = ResolvedSymbol{
+                .uri = ctx.allocator.dupe(u8, uri) catch return ToolError.OutOfMemory,
+                .line = switch (start.get("line") orelse .null) {
+                    .integer => |i| i,
+                    else => 0,
+                },
+                .character = switch (start.get("character") orelse .null) {
+                    .integer => |i| i,
+                    else => 0,
+                },
+                .name = ctx.allocator.dupe(u8, name) catch return ToolError.OutOfMemory,
+                .kind = switch (obj.get("kind") orelse .null) {
+                    .integer => |k| if (k >= 0) @intCast(k) else 0,
+                    else => 0,
+                },
+                .span = rangeSpan(full),
+            };
+            if (best == null or found.span > best.?.span) best = found;
+        }
+
+        if (obj.get("children")) |children| {
+            if (children == .array) {
+                if (try searchSymbolTree(ctx, children.array, uri, query)) |found| {
+                    if (best == null or found.span > best.?.span) best = found;
+                }
+            }
+        }
+    }
+    return best;
+}
+
+/// How many lines a `range` covers.
+fn rangeSpan(range: std.json.Value) i64 {
+    const obj = switch (range) {
+        .object => |o| o,
+        else => return 0,
+    };
+    const line_of = struct {
+        fn get(point: std.json.Value) i64 {
+            return switch (point) {
+                .object => |p| switch (p.get("line") orelse .null) {
+                    .integer => |i| i,
+                    else => 0,
+                },
+                else => 0,
+            };
+        }
+    }.get;
+    return line_of(obj.get("end") orelse .null) - line_of(obj.get("start") orelse .null);
+}
+
+/// Where a position-based request should point: either the coordinates the
+/// caller supplied, or the ones resolved from a symbol name.
+const Target = struct {
+    uri: []const u8,
+    line: i64,
+    character: i64,
+    /// Set when the position came from a symbol lookup, for the response header.
+    resolved: ?ResolvedSymbol = null,
+};
+
+fn resolveTarget(ctx: ToolContext, args: std.json.Value) ToolError!Target {
+    if (getStringArg(args, "file")) |file| {
+        const line = getPositionArg(args, "line") orelse return ToolError.InvalidParams;
+        const character = getPositionArg(args, "character") orelse return ToolError.InvalidParams;
+        const uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err|
+            return docToToolError(err);
+        return .{ .uri = uri, .line = line, .character = character };
+    }
+
+    const symbol = getStringArg(args, "symbol") orelse return ToolError.InvalidParams;
+    const found = try resolveSymbol(ctx, symbol);
+
+    // The declaration has to be open before ZLS will answer about it.
+    const path = uri_util.uriToPath(ctx.allocator, found.uri) catch return ToolError.LspError;
+    defer ctx.allocator.free(path);
+    const uri = ctx.doc_state.ensureOpen(ctx.lsp_client, path, ctx.allocator) catch |err|
+        return docToToolError(err);
+
+    return .{ .uri = uri, .line = found.line, .character = found.character, .resolved = found };
+}
+
+/// Prefix explaining which declaration a symbol query landed on, so an
+/// ambiguous name does not silently answer about the wrong one.
+fn writeResolutionNote(w: *std.Io.Writer, target: Target) !void {
+    const found = target.resolved orelse return;
+    try w.print("{s} ({s}) at {s}:{d}:{d}\n\n", .{
+        found.name,
+        lsp_types.symbolKindName(found.kind),
+        uri_util.stripFilePrefix(found.uri),
+        found.line + 1,
+        found.character + 1,
+    });
+}
+
 // ── LSP-backed tool handlers ──
 
 fn handleHover(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
-    const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const line = getPositionArg(args, "line") orelse return ToolError.InvalidParams;
-    const char = getPositionArg(args, "character") orelse return ToolError.InvalidParams;
-
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
-    defer ctx.allocator.free(file_uri);
+    const target = try resolveTarget(ctx, args);
+    defer ctx.allocator.free(target.uri);
 
     const HoverParams = struct {
         textDocument: struct { uri: []const u8 },
@@ -264,22 +470,30 @@ fn handleHover(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     };
 
     const response = ctx.lsp_client.sendRequest(ctx.allocator, "textDocument/hover", HoverParams{
-        .textDocument = .{ .uri = file_uri },
-        .position = .{ .line = line, .character = char },
+        .textDocument = .{ .uri = target.uri },
+        .position = .{ .line = target.line, .character = target.character },
     }) catch |err| return lspToToolError(err);
     defer ctx.allocator.free(response);
 
-    // Parse result from response
-    return formatHoverResponse(ctx.allocator, response) catch return ToolError.LspError;
+    const body = formatHoverResponse(ctx.allocator, response) catch return ToolError.LspError;
+    return prependResolution(ctx, target, body);
+}
+
+/// Glue the "resolved X at file:line" header onto a tool result.
+fn prependResolution(ctx: ToolContext, target: Target, body: []const u8) ToolError![]const u8 {
+    if (target.resolved == null) return body;
+    defer ctx.allocator.free(body);
+
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    errdefer aw.deinit();
+    writeResolutionNote(&aw.writer, target) catch return ToolError.OutOfMemory;
+    aw.writer.writeAll(body) catch return ToolError.OutOfMemory;
+    return aw.toOwnedSlice() catch ToolError.OutOfMemory;
 }
 
 fn handleDefinition(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
-    const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const line = getPositionArg(args, "line") orelse return ToolError.InvalidParams;
-    const char = getPositionArg(args, "character") orelse return ToolError.InvalidParams;
-
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
-    defer ctx.allocator.free(file_uri);
+    const target = try resolveTarget(ctx, args);
+    defer ctx.allocator.free(target.uri);
 
     const Params = struct {
         textDocument: struct { uri: []const u8 },
@@ -287,36 +501,94 @@ fn handleDefinition(ctx: ToolContext, args: std.json.Value) ToolError![]const u8
     };
 
     const response = ctx.lsp_client.sendRequest(ctx.allocator, "textDocument/definition", Params{
-        .textDocument = .{ .uri = file_uri },
-        .position = .{ .line = line, .character = char },
+        .textDocument = .{ .uri = target.uri },
+        .position = .{ .line = target.line, .character = target.character },
     }) catch |err| return lspToToolError(err);
     defer ctx.allocator.free(response);
 
-    return formatLocationResponse(ctx.allocator, response) catch return ToolError.LspError;
+    const body = formatLocationResponse(ctx.allocator, response) catch return ToolError.LspError;
+    return prependResolution(ctx, target, body);
 }
 
 fn handleReferences(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
-    const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const line = getPositionArg(args, "line") orelse return ToolError.InvalidParams;
-    const char = getPositionArg(args, "character") orelse return ToolError.InvalidParams;
+    if (getStringArg(args, "file") == null) {
+        const symbol = getStringArg(args, "symbol") orelse return ToolError.InvalidParams;
+        return referencesBySymbol(ctx, symbol);
+    }
 
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
-    defer ctx.allocator.free(file_uri);
+    const target = try resolveTarget(ctx, args);
+    defer ctx.allocator.free(target.uri);
 
+    const response = try requestReferences(ctx, target.uri, target.line, target.character);
+    defer ctx.allocator.free(response);
+    return formatLocationResponse(ctx.allocator, response) catch ToolError.LspError;
+}
+
+fn requestReferences(ctx: ToolContext, uri: []const u8, line: i64, character: i64) ToolError![]const u8 {
     const Params = struct {
         textDocument: struct { uri: []const u8 },
         position: struct { line: i64, character: i64 },
         context: struct { includeDeclaration: bool = true },
     };
-
-    const response = ctx.lsp_client.sendRequest(ctx.allocator, "textDocument/references", Params{
-        .textDocument = .{ .uri = file_uri },
-        .position = .{ .line = line, .character = char },
+    return ctx.lsp_client.sendRequest(ctx.allocator, "textDocument/references", Params{
+        .textDocument = .{ .uri = uri },
+        .position = .{ .line = line, .character = character },
         .context = .{},
-    }) catch |err| return lspToToolError(err);
-    defer ctx.allocator.free(response);
+    }) catch |err| lspToToolError(err);
+}
 
-    return formatLocationResponse(ctx.allocator, response) catch return ToolError.LspError;
+/// Union of the references reported for every declaration of `symbol`.
+fn referencesBySymbol(ctx: ToolContext, symbol: []const u8) ToolError![]const u8 {
+    const declarations = try resolveSymbolAll(ctx, symbol);
+
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var lines: std.ArrayList([]const u8) = .empty;
+
+    for (declarations) |decl| {
+        const path = uri_util.uriToPath(ctx.allocator, decl.uri) catch continue;
+        defer ctx.allocator.free(path);
+        const uri = ctx.doc_state.ensureOpen(ctx.lsp_client, path, ctx.allocator) catch continue;
+        defer ctx.allocator.free(uri);
+
+        const response = try requestReferences(ctx, uri, decl.line, decl.character);
+        defer ctx.allocator.free(response);
+
+        const formatted = formatLocationResponse(ctx.allocator, response) catch continue;
+        defer ctx.allocator.free(formatted);
+
+        var it = std.mem.splitScalar(u8, formatted, '\n');
+        while (it.next()) |entry| {
+            if (entry.len == 0 or entry[0] != '/') continue;
+            if (seen.contains(entry)) continue;
+            const owned = ctx.allocator.dupe(u8, entry) catch return ToolError.OutOfMemory;
+            seen.put(ctx.allocator, owned, {}) catch return ToolError.OutOfMemory;
+            lines.append(ctx.allocator, owned) catch return ToolError.OutOfMemory;
+        }
+    }
+
+    if (lines.items.len == 0) return ctx.allocator.dupe(u8, "No references found") catch ToolError.OutOfMemory;
+
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    errdefer aw.deinit();
+    const primary = declarations[0];
+    aw.writer.print("{s} ({s}) declared at {s}:{d}:{d}", .{
+        primary.name,
+        lsp_types.symbolKindName(primary.kind),
+        uri_util.stripFilePrefix(primary.uri),
+        primary.line + 1,
+        primary.character + 1,
+    }) catch return ToolError.OutOfMemory;
+    if (declarations.len > 1) {
+        // Aliases are separate declarations; say so rather than pretending the
+        // list came from one place.
+        aw.writer.print(" (+{d} re-export(s), all searched)", .{declarations.len - 1}) catch
+            return ToolError.OutOfMemory;
+    }
+    aw.writer.writeAll("\n\n") catch return ToolError.OutOfMemory;
+    for (lines.items) |entry| {
+        aw.writer.print("{s}\n", .{entry}) catch return ToolError.OutOfMemory;
+    }
+    return aw.toOwnedSlice() catch ToolError.OutOfMemory;
 }
 
 fn handleCompletion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
@@ -420,29 +692,6 @@ fn formatDiagnostics(allocator: std.mem.Allocator, payload: []const u8) ![]const
         });
     }
     return try aw.toOwnedSlice();
-}
-
-fn handleFormat(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
-    const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-
-    const file_uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err| return docToToolError(err);
-    defer ctx.allocator.free(file_uri);
-
-    const Params = struct {
-        textDocument: struct { uri: []const u8 },
-        options: struct {
-            tabSize: i64 = 4,
-            insertSpaces: bool = true,
-        },
-    };
-
-    const response = ctx.lsp_client.sendRequest(ctx.allocator, "textDocument/formatting", Params{
-        .textDocument = .{ .uri = file_uri },
-        .options = .{},
-    }) catch |err| return lspToToolError(err);
-    defer ctx.allocator.free(response);
-
-    return formatTextEditsResponse(ctx.allocator, response) catch return ToolError.LspError;
 }
 
 fn handleRename(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
@@ -565,57 +814,11 @@ fn handleSignatureHelp(ctx: ToolContext, args: std.json.Value) ToolError![]const
 
 // ── Command tool handlers ──
 
-fn handleBuild(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
-    const extra_args = getStringArg(args, "args");
-    return runZigCommand(ctx.allocator, ctx.io, ctx.workspace.root_path, "build", extra_args) catch return ToolError.CommandFailed;
-}
-
-fn handleTest(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
-    const file = getStringArg(args, "file");
-    const filter = getStringArg(args, "filter");
-
-    if (file) |f| {
-        // zig test <file> [--test-filter <filter>]
-        var cmd_args: std.ArrayList([]const u8) = .empty;
-        defer cmd_args.deinit(ctx.allocator);
-        cmd_args.append(ctx.allocator, "test") catch return ToolError.OutOfMemory;
-        cmd_args.append(ctx.allocator, f) catch return ToolError.OutOfMemory;
-        if (filter) |filt| {
-            cmd_args.append(ctx.allocator, "--test-filter") catch return ToolError.OutOfMemory;
-            cmd_args.append(ctx.allocator, filt) catch return ToolError.OutOfMemory;
-        }
-        return runZigCommandArgs(ctx.allocator, ctx.io, ctx.workspace.root_path, cmd_args.items) catch return ToolError.CommandFailed;
-    } else {
-        // zig build test
-        return runZigCommand(ctx.allocator, ctx.io, ctx.workspace.root_path, "build", "test") catch return ToolError.CommandFailed;
-    }
-}
-
 fn handleCheck(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
     const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
     const abs_path = uri_util.resolvePath(ctx.allocator, ctx.workspace.root_path, file) catch return ToolError.OutOfMemory;
     defer ctx.allocator.free(abs_path);
     return runZigCommandArgs(ctx.allocator, ctx.io, ctx.workspace.root_path, &.{ "ast-check", abs_path }) catch return ToolError.CommandFailed;
-}
-
-fn handleVersion(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
-    _ = args;
-    // Ownership is tracked by the optional, not by comparing the text against
-    // a sentinel — a command that really printed "unknown" used to leak (or,
-    // worse, hand a string literal to `free`).
-    const zig_ver: ?[]const u8 = runZigCommand(ctx.allocator, ctx.io, ctx.workspace.root_path, "version", null) catch null;
-    defer if (zig_ver) |v| ctx.allocator.free(v);
-
-    const zls_ver: ?[]const u8 = runCommandSlice(ctx.allocator, ctx.io, &.{ "zls", "--version" }, ctx.workspace.root_path) catch null;
-    defer if (zls_ver) |v| ctx.allocator.free(v);
-
-    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
-    errdefer aw.deinit();
-    aw.writer.print("Zig: {s}\nZLS: {s}", .{
-        std.mem.trimEnd(u8, zig_ver orelse "unknown", "\n\r "),
-        std.mem.trimEnd(u8, zls_ver orelse "unknown", "\n\r "),
-    }) catch return ToolError.OutOfMemory;
-    return aw.toOwnedSlice() catch return ToolError.OutOfMemory;
 }
 
 fn handleManage(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
@@ -1096,22 +1299,6 @@ fn formatSignatureHelpResponse(allocator: std.mem.Allocator, response: []const u
 
 // ── Command execution helpers ──
 
-fn runZigCommand(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8, subcmd: []const u8, extra: ?[]const u8) ![]const u8 {
-    if (extra) |args_str| {
-        // Split extra args by space
-        var arg_list: std.ArrayList([]const u8) = .empty;
-        defer arg_list.deinit(allocator);
-        try arg_list.append(allocator, "zig");
-        try arg_list.append(allocator, subcmd);
-        var it = std.mem.splitScalar(u8, args_str, ' ');
-        while (it.next()) |arg| {
-            if (arg.len > 0) try arg_list.append(allocator, arg);
-        }
-        return runCommandSlice(allocator, io, arg_list.items, cwd);
-    }
-    return runCommandSlice(allocator, io, &.{ "zig", subcmd }, cwd);
-}
-
 fn runZigCommandArgs(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8, args: []const []const u8) ![]const u8 {
     var arg_list: std.ArrayList([]const u8) = .empty;
     defer arg_list.deinit(allocator);
@@ -1462,9 +1649,15 @@ test "registerAll registers every tool exactly once" {
     defer reg.deinit();
 
     try registerAll(&reg);
-    try std.testing.expectEqual(@as(u32, 16), reg.entries.count());
+    try std.testing.expectEqual(@as(u32, 10), reg.entries.count());
     try std.testing.expect(reg.getHandler("zig_hover") != null);
     try std.testing.expect(reg.getHandler("zig_diagnostics") != null);
+
+    // Wrappers around shell commands are gone on purpose: they competed with
+    // Bash and never won.
+    for ([_][]const u8{ "zig_build", "zig_test", "zig_format", "zig_version" }) |gone| {
+        try std.testing.expect(reg.getHandler(gone) == null);
+    }
 
     // Every schema must be an object: MCP clients discard tools whose
     // `properties` is null.
@@ -1718,4 +1911,212 @@ test "a tool reports NotConnected once ZLS is gone" {
     // Must be NotConnected, not FileNotFound: the server keys its reconnect
     // attempt off this error.
     try std.testing.expectError(ToolError.NotConnected, handleHover(fx.ctx(arena.allocator()), args));
+}
+
+test "symbol-addressable tools accept a bare symbol name" {
+    // The whole point of the `symbol` form: no file, no coordinates. A schema
+    // that still demanded them would defeat it.
+    const alloc = std.testing.allocator;
+    var reg = registry.Registry.init(alloc);
+    defer reg.deinit();
+    try registerAll(&reg);
+
+    var it = reg.entries.iterator();
+    var checked: usize = 0;
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const symbol_addressable = std.mem.eql(u8, name, "zig_hover") or
+            std.mem.eql(u8, name, "zig_definition") or
+            std.mem.eql(u8, name, "zig_references");
+        if (!symbol_addressable) continue;
+        checked += 1;
+
+        const schema = entry.value_ptr.definition.inputSchema;
+        try std.testing.expect(schema.properties.object.get("symbol") != null);
+        // Nothing may be mandatory, or the symbol-only call would be invalid.
+        try std.testing.expect(schema.required == null);
+    }
+    try std.testing.expectEqual(@as(usize, 3), checked);
+}
+
+/// Answer `documentSymbol` for however many candidate files the resolver
+/// opens, then hand back control. The resolver drives the count, so the
+/// responder must not assume a fixed number of requests.
+fn serveDocumentSymbols(fake: *test_zls.FakeZls, a: std.mem.Allocator, replies: []const []const u8) !void {
+    for (replies) |reply| try serveOne(fake, a, reply);
+}
+
+test "resolveSymbol prefers the declaration over a re-export" {
+    // `const X = @import("..").X;` is its own declaration and spans one line.
+    // Ranking by span keeps a symbol query off the alias, which matters
+    // because ZLS answers about whichever declaration is under the cursor.
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("alias.zig", "const PosixMutex = @import(\"sync.zig\").PosixMutex;\n");
+    try fx.ws.writeFile("sync.zig", "pub const PosixMutex = struct {\n    inner: u8,\n};\n");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    // Both files contain the name, so both get a documentSymbol round trip.
+    // The single-line one must lose regardless of which is served first.
+    const one_line =
+        \\[{"name":"PosixMutex","kind":14,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":50}},"selectionRange":{"start":{"line":0,"character":6},"end":{"line":0,"character":16}}}]
+    ;
+    const multi_line =
+        \\[{"name":"PosixMutex","kind":23,"range":{"start":{"line":0,"character":0},"end":{"line":2,"character":2}},"selectionRange":{"start":{"line":0,"character":10},"end":{"line":0,"character":20}}}]
+    ;
+    const responder = try std.Thread.spawn(.{}, serveDocumentSymbols, .{
+        &fx.fake, alloc, &[_][]const u8{ one_line, multi_line },
+    });
+    defer responder.join();
+
+    const found = try resolveSymbol(fx.ctx(arena.allocator()), "PosixMutex");
+    try std.testing.expectEqualStrings("PosixMutex", found.name);
+    try std.testing.expectEqual(@as(i64, 2), found.span);
+    try std.testing.expectEqual(@as(u32, 23), found.kind); // Struct, not Constant
+}
+
+test "resolveSymbol ignores a name that only appears in prose" {
+    // The shortlist is textual, but the match is semantic: a mention in a
+    // comment never reaches a document symbol tree.
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("notes.zig", "// TODO: replace PosixMutex here\nconst x = 1;\n");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    const responder = try std.Thread.spawn(.{}, serveDocumentSymbols, .{
+        &fx.fake, alloc, &[_][]const u8{
+            \\[{"name":"x","kind":14,"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":12}},"selectionRange":{"start":{"line":1,"character":6},"end":{"line":1,"character":7}}}]
+        },
+    });
+    defer responder.join();
+
+    try std.testing.expectError(
+        ToolError.SymbolNotFound,
+        resolveSymbol(fx.ctx(arena.allocator()), "PosixMutex"),
+    );
+}
+
+test "resolveSymbol reports an unknown name without any LSP traffic" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("a.zig", "const a = 1;\n");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    // No file contains the name, so no candidate is opened at all.
+    try std.testing.expectError(
+        ToolError.SymbolNotFound,
+        resolveSymbol(fx.ctx(arena.allocator()), "NoSuchThing"),
+    );
+}
+
+test "resolveSymbol finds nested declarations" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("s.zig", "pub const Outer = struct {\n    pub fn inner() void {}\n};\n");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    const responder = try std.Thread.spawn(.{}, serveDocumentSymbols, .{
+        &fx.fake, alloc, &[_][]const u8{
+            \\[{"name":"Outer","kind":23,"range":{"start":{"line":0,"character":0},"end":{"line":2,"character":2}},"selectionRange":{"start":{"line":0,"character":10},"end":{"line":0,"character":15}},"children":[{"name":"inner","kind":12,"range":{"start":{"line":1,"character":4},"end":{"line":1,"character":26}},"selectionRange":{"start":{"line":1,"character":11},"end":{"line":1,"character":16}}}]}]
+        },
+    });
+    defer responder.join();
+
+    const found = try resolveSymbol(fx.ctx(arena.allocator()), "inner");
+    try std.testing.expectEqualStrings("inner", found.name);
+    try std.testing.expectEqual(@as(i64, 1), found.line);
+    try std.testing.expectEqual(@as(i64, 11), found.character); // selectionRange, not range
+}
+
+test "zig_definition by symbol needs no file or coordinates" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("sync.zig", "pub const PosixMutex = struct {\n    inner: u8,\n};\n");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    const abs = try fx.ws.path("sync.zig");
+    defer alloc.free(abs);
+    const uri = try uri_util.pathToUri(alloc, abs);
+    defer alloc.free(uri);
+
+    const Responder = struct {
+        fn run(fake: *test_zls.FakeZls, a: std.mem.Allocator, doc_uri: []const u8) !void {
+            // 1. documentSymbol locates the declaration...
+            try serveOne(fake, a,
+                \\[{"name":"PosixMutex","kind":23,"range":{"start":{"line":0,"character":0},"end":{"line":2,"character":2}},"selectionRange":{"start":{"line":0,"character":10},"end":{"line":0,"character":20}}}]
+            );
+            // 2. ...then the definition request uses the resolved position.
+            const location = try std.fmt.allocPrint(a,
+                \\{{"uri":"{s}","range":{{"start":{{"line":0,"character":10}},"end":{{"line":0,"character":20}}}}}}
+            , .{doc_uri});
+            defer a.free(location);
+            try serveOne(fake, a, location);
+        }
+    };
+    const responder = try std.Thread.spawn(.{}, Responder.run, .{ &fx.fake, alloc, uri });
+    defer responder.join();
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena.allocator(), "symbol", .{ .string = "PosixMutex" });
+
+    const out = try handleDefinition(fx.ctx(arena.allocator()), .{ .object = args });
+    // The header names the declaration the query landed on, so an ambiguous
+    // name cannot silently answer about the wrong one.
+    try std.testing.expect(std.mem.startsWith(u8, out, "PosixMutex (Struct) at "));
+    try std.testing.expect(std.mem.indexOf(u8, out, "sync.zig:1:11") != null);
+}
+
+test "a position call still works and adds no resolution header" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("a.zig", "const a = 1;\n");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const args = try positionArgs(arena.allocator(), "a.zig", 0, 6);
+
+    const responder = try std.Thread.spawn(.{}, serveOne, .{ &fx.fake, alloc, "{\"contents\":\"plain\"}" });
+    defer responder.join();
+
+    const out = try handleHover(fx.ctx(arena.allocator()), args);
+    try std.testing.expectEqualStrings("plain", out);
+}
+
+test "a symbol call with neither symbol nor position is rejected" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var empty: std.json.ObjectMap = .empty;
+    try empty.put(arena.allocator(), "unrelated", .{ .string = "x" });
+
+    try std.testing.expectError(
+        ToolError.InvalidParams,
+        handleHover(fx.ctx(arena.allocator()), .{ .object = empty }),
+    );
 }
