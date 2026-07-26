@@ -19,7 +19,7 @@ pub const State = enum {
 };
 
 pub const protocol_version = "2024-11-05";
-pub const server_version = "0.2.0";
+pub const server_version = "0.2.1";
 
 pub const McpServer = struct {
     state: State = .uninitialized,
