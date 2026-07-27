@@ -3,3 +3,4 @@ zig-out/
 src/tags
 tags
 .coverage/
+QUALITY-PLAYBOOK.md
