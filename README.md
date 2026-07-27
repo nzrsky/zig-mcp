@@ -132,12 +132,17 @@ search cannot reach.
 | `zig_signature_help` | The real signature, comptime and generic parameters included |
 | `zig_rename` | Which files a rename touches, scope-aware |
 | `zig_code_action` | Quick fixes ZLS offers for a range |
+| `zig_inlay_hints` | Every inferred type in a file at once — nothing of this is in the source text |
+| `zig_type_definition` | The declaration of a value's *type*, not of the value |
+| `zig_ast_query` | Code by shape: empty `catch {}`, `catch unreachable`, `undefined` initializers, `unreachable`, `@panic`. Matched over the syntax tree, so comments and string literals never match and multi-line forms always do |
+| `zig_unused_private` | Private declarations nothing refers to — exact, because a non-`pub` name cannot escape its file |
 
 ### What is deliberately absent
 
-There is no `zig_build`, `zig_test`, `zig_format` or `zig_version`. They used to
-exist and wrapped `zig build`, `zig test`, `zig fmt` and `zig version` — and a
-wrapper loses to the shell it wraps: no pipes, no redirection, no working
+There is no `zig_build`, `zig_test`, `zig_format`, `zig_version`, `zig_check`
+or `zig_manage`. They used to exist and wrapped `zig build`, `zig test`,
+`zig fmt`, `zig version`, `zig ast-check` and `zvm` — and a wrapper loses to
+the shell it wraps: no pipes, no redirection, no working
 directory of its own. Session transcripts settle it: 526 `zig build`
 invocations through the shell, zero calls to the tool. Run those with your
 shell.

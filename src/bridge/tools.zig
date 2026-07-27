@@ -3,6 +3,7 @@ const registry = @import("registry.zig");
 const mcp_types = @import("../mcp/types.zig");
 const lsp_types = @import("../lsp/types.zig");
 const uri_util = @import("../types/uri.zig");
+const ast_tools = @import("ast_tools.zig");
 
 const ToolContext = registry.ToolContext;
 const ToolError = registry.ToolError;
@@ -140,12 +141,59 @@ pub fn registerAll(reg: *registry.Registry) !void {
         },
     });
 
-    // Deliberately not registered: zig_build, zig_test, zig_format and
-    // zig_version. They wrapped `zig build`, `zig test`, `zig fmt` and
-    // `zig version`, and a wrapper loses to the shell it wraps — no pipes, no
-    // redirection, no working directory of its own. Session transcripts bear
-    // this out: 526 `zig build` invocations through the shell against zero
-    // calls to the tool. What is left here is what a shell cannot do.
+    try reg.register(handleInlayHints, .{
+        .name = "zig_inlay_hints",
+        .description = "Every type the compiler inferred in a file, in one call: `var x = foo()` gets its resolved type, call arguments get their parameter names. None of this exists in the source text, so no amount of reading or searching recovers it.",
+        .inputSchema = .{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
+                .{ "file", "string", "Path to the Zig source file" },
+            }),
+            .required = &.{"file"},
+        },
+    });
+
+    try reg.register(handleTypeDefinition, .{
+        .name = "zig_type_definition",
+        .description = "Jump to the declaration of a value's *type*, not of the value. On `const client = LspClient.init(...)` this lands on `LspClient`, where `zig_definition` would land on `client`.",
+        .inputSchema = .{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
+                .{ "symbol", "string", "Symbol name whose type to resolve" },
+                .{ "file", "string", "Path to the Zig source file (only with line and character)" },
+                .{ "line", "integer", "0-based line number" },
+                .{ "character", "integer", "0-based character offset" },
+            }),
+        },
+    });
+
+    try reg.register(handleAstQuery, .{
+        .name = "zig_ast_query",
+        .description = "Find code by shape rather than by text: empty `catch {}` blocks, `catch unreachable`, `undefined` initializers, `unreachable`, `@panic`. Matches over the syntax tree, so occurrences inside comments and string literals are never reported and a form spread across several lines is found exactly like a one-liner — both of which a regular expression gets wrong.",
+        .inputSchema = .{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
+                .{ "shape", "string", "One of: empty_catch, catch_unreachable, undefined_init, unreachable_literal, panic" },
+                .{ "file", "string", "Optional: one file. Omit to scan the whole workspace." },
+            }),
+            .required = &.{"shape"},
+        },
+    });
+
+    try reg.register(handleUnusedPrivate, .{
+        .name = "zig_unused_private",
+        .description = "Private declarations nothing refers to. A declaration without `pub` cannot be named from another file, so the file is the whole search space and the answer is exact. Neither the compiler nor zlint's unused-decls reports these.",
+        .inputSchema = .{
+            .properties = try mcp_types.makeProperty(reg.allocator, &.{
+                .{ "file", "string", "Optional: one file. Omit to scan the whole workspace." },
+            }),
+        },
+    });
+
+    // Deliberately not registered: zig_build, zig_test, zig_format,
+    // zig_version, zig_check and zig_manage. They wrapped `zig build`,
+    // `zig test`, `zig fmt`, `zig version`, `zig ast-check` and `zvm`, and a
+    // wrapper loses to the shell it wraps — no pipes, no redirection, no
+    // working directory of its own. Session transcripts bear this out: 526
+    // `zig build` invocations through the shell against zero calls to the
+    // tool. What is left here is what a shell cannot do.
 }
 
 // ── Helper: extract arguments ──
@@ -812,30 +860,283 @@ fn handleSignatureHelp(ctx: ToolContext, args: std.json.Value) ToolError![]const
     return formatSignatureHelpResponse(ctx.allocator, response) catch return ToolError.LspError;
 }
 
-// ── Command tool handlers ──
+// ── Inlay hints and type definition ──
 
-fn handleCheck(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
-    const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
-    const abs_path = uri_util.resolvePath(ctx.allocator, ctx.workspace.root_path, file) catch return ToolError.OutOfMemory;
-    defer ctx.allocator.free(abs_path);
-    return runZigCommandArgs(ctx.allocator, ctx.io, ctx.workspace.root_path, &.{ "ast-check", abs_path }) catch return ToolError.CommandFailed;
+fn handleTypeDefinition(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    const target = try resolveTarget(ctx, args);
+    defer ctx.allocator.free(target.uri);
+
+    const Params = struct {
+        textDocument: struct { uri: []const u8 },
+        position: struct { line: i64, character: i64 },
+    };
+    const response = ctx.lsp_client.sendRequest(ctx.allocator, "textDocument/typeDefinition", Params{
+        .textDocument = .{ .uri = target.uri },
+        .position = .{ .line = target.line, .character = target.character },
+    }) catch |err| return lspToToolError(err);
+    defer ctx.allocator.free(response);
+
+    const body = formatLocationResponse(ctx.allocator, response) catch return ToolError.LspError;
+    return prependResolution(ctx, target, body);
 }
 
-fn handleManage(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
-    const action = getStringArg(args, "action") orelse return ToolError.InvalidParams;
-    const version = getStringArg(args, "version");
+fn handleInlayHints(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    const file = getStringArg(args, "file") orelse return ToolError.InvalidParams;
+    const uri = ctx.doc_state.ensureOpen(ctx.lsp_client, file, ctx.allocator) catch |err|
+        return docToToolError(err);
+    defer ctx.allocator.free(uri);
 
-    if (std.mem.eql(u8, action, "list")) {
-        return runCommandSlice(ctx.allocator, ctx.io, &.{ "zvm", "list" }, ctx.workspace.root_path) catch
-            return ctx.allocator.dupe(u8, "zvm not found. Install from https://github.com/tristanisham/zvm") catch return ToolError.OutOfMemory;
-    } else if (std.mem.eql(u8, action, "install")) {
-        const ver = version orelse return ToolError.InvalidParams;
-        return runCommandSlice(ctx.allocator, ctx.io, &.{ "zvm", "install", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
-    } else if (std.mem.eql(u8, action, "use")) {
-        const ver = version orelse return ToolError.InvalidParams;
-        return runCommandSlice(ctx.allocator, ctx.io, &.{ "zvm", "use", ver }, ctx.workspace.root_path) catch return ToolError.CommandFailed;
+    const source = readWorkspaceFile(ctx, file) catch |err| switch (err) {
+        error.FileNotFound => return ToolError.FileNotFound,
+        error.OutOfMemory => return ToolError.OutOfMemory,
+        else => return ToolError.FileReadError,
+    };
+    defer ctx.allocator.free(source);
+    const last_line = std.mem.count(u8, source, "\n");
+
+    const Params = struct {
+        textDocument: struct { uri: []const u8 },
+        range: struct {
+            start: struct { line: i64, character: i64 },
+            end: struct { line: i64, character: i64 },
+        },
+    };
+    const response = ctx.lsp_client.sendRequest(ctx.allocator, "textDocument/inlayHint", Params{
+        .textDocument = .{ .uri = uri },
+        .range = .{
+            .start = .{ .line = 0, .character = 0 },
+            .end = .{ .line = @intCast(last_line + 1), .character = 0 },
+        },
+    }) catch |err| return lspToToolError(err);
+    defer ctx.allocator.free(response);
+
+    return formatInlayHints(ctx.allocator, response, source) catch return ToolError.LspError;
+}
+
+/// Render hints back into the source line they annotate, so the reply reads
+/// like the code rather than like a coordinate list.
+fn formatInlayHints(allocator: std.mem.Allocator, response: []const u8, source: []const u8) ![]const u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    const hints = switch (parsed.value) {
+        .object => |o| switch (o.get("result") orelse .null) {
+            .array => |a| a,
+            else => return allocator.dupe(u8, "No inlay hints for this file"),
+        },
+        else => return allocator.dupe(u8, "Invalid response"),
+    };
+    if (hints.items.len == 0) return allocator.dupe(u8, "No inlay hints: nothing in this file has an inferred type to show.");
+
+    // Collect per line, then splice right to left so earlier insertions do not
+    // shift the offsets of later ones.
+    const Hint = struct { line: usize, character: usize, label: []const u8 };
+    var collected: std.ArrayList(Hint) = .empty;
+    defer collected.deinit(allocator);
+
+    for (hints.items) |item| {
+        const obj = switch (item) {
+            .object => |o| o,
+            else => continue,
+        };
+        const position = switch (obj.get("position") orelse .null) {
+            .object => |p| p,
+            else => continue,
+        };
+        const line = switch (position.get("line") orelse .null) {
+            .integer => |i| if (i >= 0) @as(usize, @intCast(i)) else continue,
+            else => continue,
+        };
+        const character = switch (position.get("character") orelse .null) {
+            .integer => |i| if (i >= 0) @as(usize, @intCast(i)) else continue,
+            else => continue,
+        };
+        const label = switch (obj.get("label") orelse .null) {
+            .string => |l| l,
+            // The array form is a list of parts; the first carries the text.
+            .array => |parts| if (parts.items.len > 0) switch (parts.items[0]) {
+                .object => |part| switch (part.get("value") orelse .null) {
+                    .string => |v| v,
+                    else => continue,
+                },
+                else => continue,
+            } else continue,
+            else => continue,
+        };
+        try collected.append(allocator, .{ .line = line, .character = character, .label = label });
     }
-    return ToolError.InvalidParams;
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+
+    var line_iter = std.mem.splitScalar(u8, source, '\n');
+    var line_no: usize = 0;
+    while (line_iter.next()) |line_text| : (line_no += 1) {
+        var on_this_line: std.ArrayList(Hint) = .empty;
+        defer on_this_line.deinit(allocator);
+        for (collected.items) |h| {
+            if (h.line == line_no) try on_this_line.append(allocator, h);
+        }
+        if (on_this_line.items.len == 0) continue;
+
+        std.mem.sort(Hint, on_this_line.items, {}, struct {
+            fn rightToLeft(_: void, a: Hint, b: Hint) bool {
+                return a.character > b.character;
+            }
+        }.rightToLeft);
+
+        var spliced: std.ArrayList(u8) = .empty;
+        defer spliced.deinit(allocator);
+        try spliced.appendSlice(allocator, line_text);
+        for (on_this_line.items) |h| {
+            const at = @min(h.character, spliced.items.len);
+            try spliced.insertSlice(allocator, at, h.label);
+        }
+        try aw.writer.print("{d}: {s}\n", .{ line_no + 1, std.mem.trim(u8, spliced.items, " \t\r") });
+    }
+
+    if (aw.written().len == 0) return allocator.dupe(u8, "No inlay hints for this file");
+    return aw.toOwnedSlice();
+}
+
+// ── AST queries ──
+
+fn readWorkspaceFile(ctx: ToolContext, file: []const u8) ![:0]u8 {
+    const abs = try uri_util.resolvePath(ctx.allocator, ctx.workspace.root_path, file);
+    defer ctx.allocator.free(abs);
+    const contents = std.Io.Dir.cwd().readFileAlloc(ctx.io, abs, ctx.allocator, std.Io.Limit.limited(max_source_bytes)) catch |err| switch (err) {
+        error.FileNotFound => return error.FileNotFound,
+        else => return error.FileReadError,
+    };
+    defer ctx.allocator.free(contents);
+    return ctx.allocator.dupeSentinel(u8, contents, 0);
+}
+
+/// Every `.zig` file in the workspace, workspace-relative. Caller frees.
+fn workspaceZigFiles(ctx: ToolContext) ToolError![]const []const u8 {
+    var dir = std.Io.Dir.cwd().openDir(ctx.io, ctx.workspace.root_path, .{ .iterate = true }) catch
+        return ToolError.FileReadError;
+    defer dir.close(ctx.io);
+
+    var walker = dir.walk(ctx.allocator) catch return ToolError.OutOfMemory;
+    defer walker.deinit();
+
+    var files: std.ArrayList([]const u8) = .empty;
+    errdefer files.deinit(ctx.allocator);
+
+    while (walker.next(ctx.io) catch null) |entry| {
+        if (files.items.len >= max_scanned_files) break;
+        if (entry.kind == .directory) {
+            if (isSkippedDir(entry.basename)) walker.leave(ctx.io);
+            continue;
+        }
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const owned = ctx.allocator.dupe(u8, entry.path) catch return ToolError.OutOfMemory;
+        files.append(ctx.allocator, owned) catch return ToolError.OutOfMemory;
+    }
+    return files.toOwnedSlice(ctx.allocator) catch ToolError.OutOfMemory;
+}
+
+/// Say out loud how much of the tree was not analyzed. A scan that silently
+/// drops unreadable or unparsable files and then answers "nothing found"
+/// reports a clean bill of health it did not earn.
+fn writeSkipNote(aw: *std.Io.Writer.Allocating, skipped: usize, total_files: usize) ToolError!void {
+    if (skipped == 0) return;
+    aw.writer.print(
+        "\nIncomplete: {d} of {d} file(s) could not be read or parsed and were not analyzed.\n",
+        .{ skipped, total_files },
+    ) catch return ToolError.OutOfMemory;
+}
+
+fn handleAstQuery(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    const shape_name = getStringArg(args, "shape") orelse return ToolError.InvalidParams;
+    const shape = ast_tools.Shape.fromString(shape_name) orelse return ToolError.InvalidParams;
+
+    const files: []const []const u8 = if (getStringArg(args, "file")) |one|
+        &.{one}
+    else
+        try workspaceZigFiles(ctx);
+
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    errdefer aw.deinit();
+    var total: usize = 0;
+    var skipped: usize = 0;
+
+    for (files) |file| {
+        const source = readWorkspaceFile(ctx, file) catch {
+            skipped += 1;
+            continue;
+        };
+        defer ctx.allocator.free(source);
+
+        var matches: std.ArrayList(ast_tools.Match) = .empty;
+        defer {
+            for (matches.items) |m| ctx.allocator.free(m.text);
+            matches.deinit(ctx.allocator);
+        }
+        ast_tools.findShape(ctx.allocator, source, shape, &matches) catch {
+            skipped += 1;
+            continue;
+        };
+
+        for (matches.items) |m| {
+            total += 1;
+            aw.writer.print("{s}:{d}:{d}: {s}\n", .{ file, m.line, m.column, m.text }) catch
+                return ToolError.OutOfMemory;
+        }
+    }
+
+    aw.writer.print("\n{d} occurrence(s) of: {s}\n", .{ total, shape.describe() }) catch
+        return ToolError.OutOfMemory;
+    // Never report a clean result while quietly having skipped part of the
+    // tree: "no matches" and "no matches among what I could read" are
+    // different answers.
+    try writeSkipNote(&aw, skipped, files.len);
+    return aw.toOwnedSlice() catch ToolError.OutOfMemory;
+}
+
+fn handleUnusedPrivate(ctx: ToolContext, args: std.json.Value) ToolError![]const u8 {
+    const files: []const []const u8 = if (getStringArg(args, "file")) |one|
+        &.{one}
+    else
+        try workspaceZigFiles(ctx);
+
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    errdefer aw.deinit();
+    var total: usize = 0;
+    var skipped: usize = 0;
+
+    for (files) |file| {
+        const source = readWorkspaceFile(ctx, file) catch {
+            skipped += 1;
+            continue;
+        };
+        defer ctx.allocator.free(source);
+
+        var found: std.ArrayList(ast_tools.UnusedDecl) = .empty;
+        defer {
+            for (found.items) |d| ctx.allocator.free(d.name);
+            found.deinit(ctx.allocator);
+        }
+        ast_tools.findUnusedPrivate(ctx.allocator, source, &found) catch {
+            skipped += 1;
+            continue;
+        };
+
+        for (found.items) |d| {
+            total += 1;
+            aw.writer.print("{s}:{d}:{d}: private {s} `{s}` is never referenced\n", .{
+                file, d.line, d.column, d.kind, d.name,
+            }) catch return ToolError.OutOfMemory;
+        }
+    }
+
+    if (total == 0) {
+        aw.writer.writeAll("No unused private declarations") catch return ToolError.OutOfMemory;
+    }
+    try writeSkipNote(&aw, skipped, files.len);
+    return aw.toOwnedSlice() catch ToolError.OutOfMemory;
 }
 
 // ── Response formatters ──
@@ -1297,52 +1598,6 @@ fn formatSignatureHelpResponse(allocator: std.mem.Allocator, response: []const u
     return try aw.toOwnedSlice();
 }
 
-// ── Command execution helpers ──
-
-fn runZigCommandArgs(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8, args: []const []const u8) ![]const u8 {
-    var arg_list: std.ArrayList([]const u8) = .empty;
-    defer arg_list.deinit(allocator);
-    try arg_list.append(allocator, "zig");
-    for (args) |arg| {
-        try arg_list.append(allocator, arg);
-    }
-    return runCommandSlice(allocator, io, arg_list.items, cwd);
-}
-
-fn runCommandSlice(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cwd: []const u8) ![]const u8 {
-    const result = try std.process.run(allocator, io, .{
-        .argv = argv,
-        .cwd = .{ .path = cwd },
-        .stdout_limit = std.Io.Limit.limited(512 * 1024),
-        .stderr_limit = std.Io.Limit.limited(512 * 1024),
-    });
-    defer allocator.free(result.stderr);
-
-    if (result.term == .exited and result.term.exited == 0) {
-        return result.stdout;
-    }
-
-    // On failure, combine stdout + stderr
-    defer allocator.free(result.stdout);
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-    if (result.stdout.len > 0) {
-        try aw.writer.writeAll(result.stdout);
-    }
-    if (result.stderr.len > 0) {
-        if (result.stdout.len > 0) try aw.writer.writeByte('\n');
-        try aw.writer.writeAll(result.stderr);
-    }
-    if (result.stdout.len == 0 and result.stderr.len == 0) {
-        const exit_code: u8 = switch (result.term) {
-            .exited => |c| c,
-            else => 1,
-        };
-        try aw.writer.print("Command exited with code {d}", .{exit_code});
-    }
-    return try aw.toOwnedSlice();
-}
-
 fn lspToToolError(err: anytype) ToolError {
     return switch (err) {
         error.NotConnected => ToolError.NotConnected,
@@ -1649,13 +1904,13 @@ test "registerAll registers every tool exactly once" {
     defer reg.deinit();
 
     try registerAll(&reg);
-    try std.testing.expectEqual(@as(u32, 10), reg.entries.count());
+    try std.testing.expectEqual(@as(u32, 14), reg.entries.count());
     try std.testing.expect(reg.getHandler("zig_hover") != null);
     try std.testing.expect(reg.getHandler("zig_diagnostics") != null);
 
     // Wrappers around shell commands are gone on purpose: they competed with
     // Bash and never won.
-    for ([_][]const u8{ "zig_build", "zig_test", "zig_format", "zig_version" }) |gone| {
+    for ([_][]const u8{ "zig_build", "zig_test", "zig_format", "zig_version", "zig_check", "zig_manage" }) |gone| {
         try std.testing.expect(reg.getHandler(gone) == null);
     }
 
@@ -2119,4 +2374,66 @@ test "a symbol call with neither symbol nor position is rejected" {
         ToolError.InvalidParams,
         handleHover(fx.ctx(arena.allocator()), .{ .object = empty }),
     );
+}
+
+test "a scan that skipped files says so instead of reporting a clean result" {
+    // A silent `catch continue` over an unreadable file plus a "No matches"
+    // verdict is a clean bill of health the scan did not earn.
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena.allocator(), "shape", .{ .string = "empty_catch" });
+    try args.put(arena.allocator(), "file", .{ .string = "does-not-exist.zig" });
+
+    const out = try handleAstQuery(fx.ctx(arena.allocator()), .{ .object = args });
+    try std.testing.expect(std.mem.indexOf(u8, out, "Incomplete: 1 of 1") != null);
+}
+
+test "an unknown shape is rejected rather than silently matching nothing" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena.allocator(), "shape", .{ .string = "no_such_shape" });
+
+    try std.testing.expectError(
+        ToolError.InvalidParams,
+        handleAstQuery(fx.ctx(arena.allocator()), .{ .object = args }),
+    );
+}
+
+test "ast query finds a shape a regex would miss and skips one it would falsely match" {
+    const alloc = std.testing.allocator;
+    var fx = try ToolFixture.init(alloc);
+    try fx.start();
+    defer fx.deinit();
+    try fx.ws.writeFile("s.zig",
+        \\// foo() catch {} in a comment
+        \\fn a() void {
+        \\    bar() catch {
+        \\    };
+        \\}
+    );
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena.allocator(), "shape", .{ .string = "empty_catch" });
+    try args.put(arena.allocator(), "file", .{ .string = "s.zig" });
+
+    const out = try handleAstQuery(fx.ctx(arena.allocator()), .{ .object = args });
+    // The multi-line form is found; the comment is not.
+    try std.testing.expect(std.mem.indexOf(u8, out, "s.zig:3:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "1 occurrence") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Incomplete") == null);
 }

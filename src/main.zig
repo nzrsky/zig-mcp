@@ -23,6 +23,7 @@ comptime {
     _ = @import("mcp/types.zig");
     _ = @import("bridge/registry.zig");
     _ = @import("bridge/tools.zig");
+    _ = @import("bridge/ast_tools.zig");
     _ = @import("bridge/resources.zig");
     _ = @import("state/documents.zig");
     _ = @import("state/workspace.zig");
