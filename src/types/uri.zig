@@ -92,6 +92,34 @@ pub fn uriToPath(allocator: std.mem.Allocator, uri: []const u8) ![]const u8 {
     return out;
 }
 
+/// Canonical form of a URI for use as a map key. ZLS may spell the same Windows
+/// file as `file:///e%3A/dir/f.zig` while we send `file:///E:/dir/f.zig`; on Windows
+/// both normalise to the same key (percent-decoded, lower-case drive letter).
+/// Elsewhere this is a plain copy. Caller owns the returned memory.
+pub fn canonicalKey(allocator: std.mem.Allocator, uri: []const u8) ![]u8 {
+    if (builtin.os.tag != .windows) return allocator.dupe(u8, uri);
+
+    var out = try allocator.alloc(u8, uri.len);
+    errdefer allocator.free(out);
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < uri.len) {
+        if (uri[i] == '%' and i + 2 < uri.len and unhex(uri[i + 1]) != null and unhex(uri[i + 2]) != null) {
+            out[pos] = (@as(u8, unhex(uri[i + 1]).?) << 4) | @as(u8, unhex(uri[i + 2]).?);
+            i += 3;
+        } else {
+            out[pos] = uri[i];
+            i += 1;
+        }
+        pos += 1;
+    }
+    const prefix = "file:///";
+    if (pos > prefix.len + 1 and std.mem.startsWith(u8, out[0..pos], prefix) and out[prefix.len + 1] == ':') {
+        out[prefix.len] = std.ascii.toLower(out[prefix.len]);
+    }
+    return allocator.realloc(out, pos);
+}
+
 /// Make an absolute path from workspace root and relative path.
 /// Caller owns returned memory.
 pub fn resolvePath(allocator: std.mem.Allocator, workspace: []const u8, relative: []const u8) ![]const u8 {
