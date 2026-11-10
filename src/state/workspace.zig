@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const uri_util = @import("../types/uri.zig");
 
 /// Workspace state: tracks root path and provides URI conversion.
@@ -12,6 +13,8 @@ pub const Workspace = struct {
         const abs_path = if (std.fs.path.isAbsolute(workspace_path))
             try allocator.dupe(u8, workspace_path)
         else blk: {
+            // Windows build has no libc; callers must pass an absolute path there.
+            if (builtin.os.tag == .windows) return error.RelativeWorkspaceUnsupported;
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const cwd_result = std.c.getcwd(&buf, buf.len) orelse return error.CurrentWorkingDirectoryUnlinked;
             const cwd = std.mem.sliceTo(cwd_result, 0);
