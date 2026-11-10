@@ -1,15 +1,19 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Convert a file system path to a file:// URI.
 /// Caller owns the returned memory.
 pub fn pathToUri(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     // file:///absolute/path
-    const prefix = "file://";
+    // Windows: C:\dir\f.zig -> file:///C:/dir/f.zig (extra slash, forward slashes)
+    const is_win = builtin.os.tag == .windows;
+    const drive = is_win and path.len >= 2 and path[1] == ':';
+    const prefix = if (drive) "file:///" else "file://";
     var len: usize = prefix.len;
 
     // Count encoded length
     for (path) |c| {
-        len += if (needsEncoding(c)) @as(usize, 3) else 1;
+        len += if (needsEncoding(if (is_win and c == '\\') '/' else c)) @as(usize, 3) else 1;
     }
 
     const buf = try allocator.alloc(u8, len);
@@ -17,7 +21,8 @@ pub fn pathToUri(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 
     @memcpy(buf[0..prefix.len], prefix);
     var pos: usize = prefix.len;
-    for (path) |c| {
+    for (path) |raw| {
+        const c = if (is_win and raw == '\\') '/' else raw;
         if (needsEncoding(c)) {
             buf[pos] = '%';
             buf[pos + 1] = hexDigit(c >> 4);
@@ -71,7 +76,20 @@ pub fn uriToPath(allocator: std.mem.Allocator, uri: []const u8) ![]const u8 {
             i += 1;
         }
     }
-    return buf[0..pos];
+    var out = buf[0..pos];
+    if (builtin.os.tag == .windows) {
+        // /C:/dir/f.zig (or /c%3A decoded to /c:) -> C:\dir\f.zig
+        if (out.len >= 3 and out[0] == '/' and out[2] == ':') out = out[1..];
+        for (out) |*ch| {
+            if (ch.* == '/') ch.* = '\\';
+        }
+        if (out.len >= 2 and out[1] == ':') out[0] = std.ascii.toUpper(out[0]);
+        // Hand back an exactly-sized allocation so the caller can free it.
+        const exact = try allocator.dupe(u8, out);
+        allocator.free(buf);
+        return exact;
+    }
+    return out;
 }
 
 /// Make an absolute path from workspace root and relative path.
