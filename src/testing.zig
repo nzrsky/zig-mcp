@@ -2,6 +2,7 @@
 //! Shared test-only helpers.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// The test runner's `Io`. Note that `std.Io` is a fat pointer into an
 /// `Io.Threaded` instance, so an `Io` must never outlive the instance backing
@@ -16,7 +17,23 @@ pub const Pipe = struct {
     read_end: std.Io.File,
     write_end: std.Io.File,
 
+    extern "kernel32" fn CreatePipe(
+        read: *std.os.windows.HANDLE,
+        write: *std.os.windows.HANDLE,
+        attrs: ?*anyopaque,
+        size: u32,
+    ) callconv(.winapi) std.os.windows.BOOL;
+
     pub fn open() !Pipe {
+        if (builtin.os.tag == .windows) {
+            var r: std.os.windows.HANDLE = undefined;
+            var w: std.os.windows.HANDLE = undefined;
+            if (CreatePipe(&r, &w, null, 0) == .FALSE) return error.SystemResources;
+            return .{
+                .read_end = .{ .handle = r, .flags = .{ .nonblocking = false } },
+                .write_end = .{ .handle = w, .flags = .{ .nonblocking = false } },
+            };
+        }
         var fds: [2]std.c.fd_t = undefined;
         if (std.c.pipe(&fds) != 0) return error.SystemResources;
         return .{
