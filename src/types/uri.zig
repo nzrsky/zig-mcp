@@ -1,15 +1,19 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Convert a file system path to a file:// URI.
 /// Caller owns the returned memory.
 pub fn pathToUri(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     // file:///absolute/path
-    const prefix = "file://";
+    // Windows: C:\dir\f.zig -> file:///C:/dir/f.zig (extra slash, forward slashes)
+    const is_win = builtin.os.tag == .windows;
+    const drive = is_win and path.len >= 2 and path[1] == ':';
+    const prefix = if (drive) "file:///" else "file://";
     var len: usize = prefix.len;
 
     // Count encoded length
     for (path) |c| {
-        len += if (needsEncoding(c)) @as(usize, 3) else 1;
+        len += if (needsEncoding(if (is_win and c == '\\') '/' else c)) @as(usize, 3) else 1;
     }
 
     const buf = try allocator.alloc(u8, len);
@@ -17,7 +21,8 @@ pub fn pathToUri(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 
     @memcpy(buf[0..prefix.len], prefix);
     var pos: usize = prefix.len;
-    for (path) |c| {
+    for (path) |raw| {
+        const c = if (is_win and raw == '\\') '/' else raw;
         if (needsEncoding(c)) {
             buf[pos] = '%';
             buf[pos + 1] = hexDigit(c >> 4);
@@ -71,7 +76,48 @@ pub fn uriToPath(allocator: std.mem.Allocator, uri: []const u8) ![]const u8 {
             i += 1;
         }
     }
-    return buf[0..pos];
+    var out = buf[0..pos];
+    if (builtin.os.tag == .windows) {
+        // /C:/dir/f.zig (or /c%3A decoded to /c:) -> C:\dir\f.zig
+        if (out.len >= 3 and out[0] == '/' and out[2] == ':') out = out[1..];
+        for (out) |*ch| {
+            if (ch.* == '/') ch.* = '\\';
+        }
+        if (out.len >= 2 and out[1] == ':') out[0] = std.ascii.toUpper(out[0]);
+        // Hand back an exactly-sized allocation so the caller can free it.
+        const exact = try allocator.dupe(u8, out);
+        allocator.free(buf);
+        return exact;
+    }
+    return out;
+}
+
+/// Canonical form of a URI for use as a map key. ZLS may spell the same Windows
+/// file as `file:///e%3A/dir/f.zig` while we send `file:///E:/dir/f.zig`; on Windows
+/// both normalise to the same key (percent-decoded, lower-case drive letter).
+/// Elsewhere this is a plain copy. Caller owns the returned memory.
+pub fn canonicalKey(allocator: std.mem.Allocator, uri: []const u8) ![]u8 {
+    if (builtin.os.tag != .windows) return allocator.dupe(u8, uri);
+
+    var out = try allocator.alloc(u8, uri.len);
+    errdefer allocator.free(out);
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < uri.len) {
+        if (uri[i] == '%' and i + 2 < uri.len and unhex(uri[i + 1]) != null and unhex(uri[i + 2]) != null) {
+            out[pos] = (@as(u8, unhex(uri[i + 1]).?) << 4) | @as(u8, unhex(uri[i + 2]).?);
+            i += 3;
+        } else {
+            out[pos] = uri[i];
+            i += 1;
+        }
+        pos += 1;
+    }
+    const prefix = "file:///";
+    if (pos > prefix.len + 1 and std.mem.startsWith(u8, out[0..pos], prefix) and out[prefix.len + 1] == ':') {
+        out[prefix.len] = std.ascii.toLower(out[prefix.len]);
+    }
+    return allocator.realloc(out, pos);
 }
 
 /// Make an absolute path from workspace root and relative path.

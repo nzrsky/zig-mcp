@@ -2,6 +2,7 @@ const std = @import("std");
 const LspTransport = @import("transport.zig").LspTransport;
 const json_rpc = @import("../types/json_rpc.zig");
 const PosixMutex = @import("../sync.zig").PosixMutex;
+const uri_util = @import("../types/uri.zig");
 const testing = @import("../testing.zig");
 const FakeZls = @import("../test_zls.zig").FakeZls;
 const respondToNext = @import("../test_zls.zig").respondToNext;
@@ -351,7 +352,7 @@ pub const LspClient = struct {
         jw.write(items) catch return;
 
         const stored = self.allocator.dupe(u8, aw.written()) catch return;
-        const key = self.allocator.dupe(u8, uri) catch {
+        const key = uri_util.canonicalKey(self.allocator, uri) catch {
             self.allocator.free(stored);
             return;
         };
@@ -372,9 +373,11 @@ pub const LspClient = struct {
     /// Drop any cached diagnostics for `uri` (called when the document changes,
     /// so a stale report is never mistaken for a fresh one).
     pub fn clearDiagnostics(self: *LspClient, uri: []const u8) void {
+        const k = uri_util.canonicalKey(self.allocator, uri) catch return;
+        defer self.allocator.free(k);
         self.diagnostics_mutex.lock();
         defer self.diagnostics_mutex.unlock();
-        if (self.diagnostics.fetchRemove(uri)) |old| {
+        if (self.diagnostics.fetchRemove(k)) |old| {
             self.allocator.free(old.key);
             self.allocator.free(old.value);
         }
@@ -382,9 +385,11 @@ pub const LspClient = struct {
 
     /// Copy of the cached diagnostics array for `uri`, if any.
     pub fn getDiagnostics(self: *LspClient, allocator: std.mem.Allocator, uri: []const u8) !?[]const u8 {
+        const k = try uri_util.canonicalKey(self.allocator, uri);
+        defer self.allocator.free(k);
         self.diagnostics_mutex.lock();
         defer self.diagnostics_mutex.unlock();
-        const found = self.diagnostics.get(uri) orelse return null;
+        const found = self.diagnostics.get(k) orelse return null;
         return try allocator.dupe(u8, found);
     }
 

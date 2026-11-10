@@ -55,7 +55,8 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
     // Parse command-line arguments
-    var args = init.minimal.args.iterate();
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
 
     var workspace_path: ?[]const u8 = null;
     var zls_path_arg: ?[]const u8 = null;
